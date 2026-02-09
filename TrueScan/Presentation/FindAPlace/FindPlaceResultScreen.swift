@@ -121,7 +121,7 @@ struct FindPlaceResultScreen: View {
 
                 VStack(alignment: .leading, spacing: 6.scale) {
                     Text("AI Analysis Result")
-                        .font(Tokens.Font.bodySemibold16)
+                        .font(Tokens.Font.semibold16)
                         .foregroundStyle(Tokens.Color.textPrimary)
 
                     Text(text)
@@ -156,7 +156,7 @@ struct FindPlaceResultScreen: View {
                 )
 
                 Text("Find out more location")
-                    .font(Tokens.Font.bodySemibold16)
+                    .font(Tokens.Font.semibold16)
                     .tracking(-0.16)
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)

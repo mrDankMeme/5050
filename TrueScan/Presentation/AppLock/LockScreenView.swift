@@ -46,7 +46,7 @@ struct LockScreenView: View {
                     .foregroundStyle(Tokens.Color.textPrimary)
 
                 Text("Unlock to continue")
-                    .font(Tokens.Font.bodyMedium16)
+                    .font(Tokens.Font.medium16)
                     .foregroundStyle(Tokens.Color.textSecondary)
                     .padding(.top, 10.scale)
 
@@ -159,7 +159,7 @@ private struct LockKeypadView: View {
             HStack(spacing: colSpacing.scale - 20.scale) {
                 Button(action: onSkip) {
                     Text("Skip")
-                        .font(Tokens.Font.bodyMedium16)
+                        .font(Tokens.Font.medium16)
                         .foregroundStyle(Tokens.Color.textSecondary)
                         .frame(width: 64.scale, height: 44.scale, alignment: .leading)
                 }

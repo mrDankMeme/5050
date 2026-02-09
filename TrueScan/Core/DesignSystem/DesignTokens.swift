@@ -25,14 +25,14 @@ public enum Tokens {
     // MARK: Typography
     public enum Font {
         static var titleSemibold32: SwiftUI.Font { .custom("SFProDisplay-Semibold", size: 32.scale) }
-
+        
         public static var h1: SwiftUI.Font { .custom("SFProDisplay-Semibold", size: 32.scale) }
         public static var h2: SwiftUI.Font { .custom("SFProDisplay-Medium",  size: 28.scale) }
-        public static var title: SwiftUI.Font { .custom("SFProDisplay-Medium", size: 22.scale) }
+        
         public static var subtitle: SwiftUI.Font { .custom("SFProDisplay-Bold", size: 20.scale) }
         public static var medium20: SwiftUI.Font { .custom("SFProDisplay-Medium", size: 20.scale) }
         
-
+        
         public static var body: SwiftUI.Font { .custom("SFProText-Regular",  size: 20.scale) }
         public static var bodyMedium18: SwiftUI.Font { .custom("SFProText-Medium",   size: 18.scale) }
         public static var bodyMedium: SwiftUI.Font { .custom("SFProText-Medium",     size: 16.scale) }
@@ -40,16 +40,48 @@ public enum Tokens {
         public static var caption: SwiftUI.Font { .custom("SFProText-Medium",        size: 15.scale) }
         public static var regular16: SwiftUI.Font { .custom("SFProText-Regular",        size: 16.scale) }
         public static var captionRegular: SwiftUI.Font { .custom("SFProText-Regular", size: 15.scale) }
+        
+        
+        public static var title: SwiftUI.Font { .custom("SFProDisplay-Medium", size: 22.scale) }
+        public static var h0Bold34: SwiftUI.Font { .custom("SFProDisplay-Bold", size: 34.scale) }
+        public static var heavy28: SwiftUI.Font { .custom("SFProDisplay-Heavy", size: 28.scale) }
+        public static var bold18: SwiftUI.Font { .custom("SFProDisplay-Bold", size: 18.21.scale) }
+        public static var bold28: SwiftUI.Font { .custom("SFProDisplay-Bold", size: 28.scale) }
+        public static var bold15: SwiftUI.Font { .custom("SFProDisplay-Bold", size: 15.scale) }
+        public static var bold22: SwiftUI.Font { .custom("SFProDisplay-Bold", size: 22.scale) }
 
-        static var bodySemibold16: SwiftUI.Font { .custom("SFProDisplay-Semibold", size: 16.scale) }
-        static var semibold13: SwiftUI.Font { .custom("SFProDisplay-Semibold", size: 13.scale) }
-        static var bodySemibold20: SwiftUI.Font { .custom("SFProDisplay-Semibold", size: 20.scale) }
-        static var titleMedium28: SwiftUI.Font { .custom("SFProDisplay-Medium", size: 28.scale) }
-        static var bodyMedium16: SwiftUI.Font { .custom("SFProDisplay-Medium", size: 16.scale) }
-        static var medium18: SwiftUI.Font { .custom("SFProDisplay-Medium", size: 18.scale) }
-        static var medium16: SwiftUI.Font { .custom("SFProDisplay-Medium", size: 16.scale) }
+        public static var semibold16: SwiftUI.Font { .custom("SFProText-Semibold", size: 16.scale) }
+        public static var semibold24: SwiftUI.Font { .custom("SFProText-Semibold", size: 24.scale) }
+        public static var semibold22: SwiftUI.Font { .custom("SFProText-Semibold", size: 22.scale) }
+        public static var semibold17: SwiftUI.Font { .custom("SFProText-Semibold", size: 17.scale) }
+        public static var bold17: SwiftUI.Font { .custom("SFProText-Bold", size: 17.scale) }
+        public static var medium17: SwiftUI.Font { .custom("SFProText-Medium", size: 17.scale) }
+        public static var medium14: SwiftUI.Font { .custom("SFProText-Medium", size: 14.scale) }
+        public static var medium11: SwiftUI.Font { .custom("SFProText-Medium", size: 11.scale) }
+        public static var semibold18: SwiftUI.Font { .custom("SFProText-Semibold", size: 18.scale) }
+        public static var semibold15: SwiftUI.Font { .custom("SFProText-Semibold", size: 15.scale) }
+        public static var semibold11: SwiftUI.Font { .custom("SFProText-Semibold", size: 11.scale) }
+        public static var semibold13: SwiftUI.Font { .custom("SFProText-Semibold", size: 13.scale) }
+        public static var regular17: SwiftUI.Font { .custom("SFProText-Regular", size: 17.scale) }
+        
+        public static var medium22: SwiftUI.Font { .custom("SFProText-Medium", size: 22.scale) }
+        public static var medium16: SwiftUI.Font { .custom("SFProText-Medium", size: 16.scale) }
+        public static var semibold20: SwiftUI.Font { .custom("SFProText-Semibold", size: 20.scale) }
+        public static var medium18: SwiftUI.Font { .custom("SFProText-Medium", size: 18.scale) }
+        public static var medium15: SwiftUI.Font { .custom("SFProText-Medium", size: 15.scale) }
+        public static var regular15: SwiftUI.Font { .custom("SFProText-Regular", size: 15.scale) }
+        public static var regular14: SwiftUI.Font { .custom("SFProText-Regular", size: 14.scale) }
+        public static var regular11: SwiftUI.Font { .custom("SFProText-Regular", size: 11.scale) }
+        public static var regular13: SwiftUI.Font { .custom("SFProText-Regular", size: 13.scale) }
+        public static var regular12: SwiftUI.Font { .custom("SFProText-Regular", size: 12.scale) }
+        public static var medium13: SwiftUI.Font { .custom("SFProText-Medium", size: 13.scale) }
+        
+        //MARK: - InterTight
         static var optionsMedium16: SwiftUI.Font { .custom("InterTight-Medium", size: 16.scale) }
         static var interTight16: SwiftUI.Font { .custom("InterTight-Medium", size: 16.scale) }
+
+        // MARK: - Lato
+        public static var latoRegular14: SwiftUI.Font { .custom("Lato-Regular", size: 13.scale) }
     }
 
     // MARK: Spacing & Radius

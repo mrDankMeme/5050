@@ -57,7 +57,7 @@ struct HomeFeatureCardView: View {
 
                 HStack(spacing: 8.scale) {
                     Text(buttonTitle)
-                        .font(Tokens.Font.bodySemibold16)
+                        .font(Tokens.Font.semibold16)
                         .tracking(-0.16)
 
                     Spacer()

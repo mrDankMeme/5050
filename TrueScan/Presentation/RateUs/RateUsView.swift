@@ -91,7 +91,7 @@ struct RateUsView: View {
                         onLater()
                     }) {
                         Text("Rate later")
-                            .font(Tokens.Font.bodySemibold16)
+                            .font(Tokens.Font.semibold16)
                             .foregroundStyle(Tokens.Color.textSecondary.opacity(0.6))
                             .lineLimit(1)
                             .frame(maxWidth: .infinity)

@@ -54,7 +54,7 @@ struct PaywallPlanRowView: View {
 
                     VStack(alignment: .leading, spacing: 4.scale) {
                         Text(displayTitle)
-                            .font(Tokens.Font.bodyMedium16)
+                            .font(Tokens.Font.medium16)
                             .foregroundStyle(Tokens.Color.textPrimary)
                             .lineLimit(1)
                             .redacted(reason: isLoaded ? [] : .placeholder)
@@ -71,7 +71,7 @@ struct PaywallPlanRowView: View {
 
                     if let displayTrailingPrice {
                         Text(displayTrailingPrice)
-                            .font(Tokens.Font.bodyMedium16)
+                            .font(Tokens.Font.medium16)
                             .foregroundStyle(Tokens.Color.textPrimary)
                             .lineLimit(1)
                             .redacted(reason: isLoaded ? [] : .placeholder)
@@ -108,7 +108,7 @@ struct PaywallPlanRowView: View {
                             )
 
                         Text(badge)
-                            .font(Tokens.Font.bodyMedium16)
+                            .font(Tokens.Font.medium16)
                             .foregroundStyle(.white)
                     }
                     .frame(width: 90.scale, height: 21.scale)

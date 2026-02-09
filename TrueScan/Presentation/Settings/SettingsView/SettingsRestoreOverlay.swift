@@ -16,7 +16,7 @@ struct SettingsRestoreOverlay: View {
                 .scaleEffect(1.15)
 
             Text("Restoring…")
-                .font(Tokens.Font.bodyMedium16)
+                .font(Tokens.Font.medium16)
                 .foregroundStyle(Tokens.Color.textPrimary)
         }
         .padding(.horizontal, Tokens.Spacing.x16)

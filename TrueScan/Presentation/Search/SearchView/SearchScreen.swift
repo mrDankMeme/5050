@@ -236,7 +236,7 @@ struct SearchScreen: View {
 
                 HStack(spacing: 8.scale) {
                     Text("Start search")
-                        .font(Tokens.Font.bodySemibold16)
+                        .font(Tokens.Font.semibold16)
                         .tracking(-0.16)
 
                     Spacer()
@@ -278,7 +278,7 @@ private struct UploadPhotoCardView: View {
                     .foregroundStyle(Tokens.Color.blue)
 
                 Text("Upload a photo")
-                    .font(Tokens.Font.bodySemibold16)
+                    .font(Tokens.Font.semibold16)
                     .foregroundStyle(Tokens.Color.blue)
             }
         }

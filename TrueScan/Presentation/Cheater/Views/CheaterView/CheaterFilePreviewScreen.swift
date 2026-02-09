@@ -47,7 +47,7 @@ struct CheaterFilePreviewScreen: View {
 
                         HStack(spacing: 8.scale) {
                             Text("Check messages")
-                                .font(Tokens.Font.bodySemibold16)
+                                .font(Tokens.Font.semibold16)
                                 .tracking(-0.16)
 
                             Spacer()

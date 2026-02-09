@@ -283,7 +283,7 @@ private extension FaceSearchView {
             }
         } label: {
             Text(target.title)
-                .font(Tokens.Font.bodySemibold16)
+                .font(Tokens.Font.semibold16)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .foregroundStyle(isSelected ? Color.white : Tokens.Color.textPrimary)
                 .background(
@@ -325,7 +325,7 @@ private struct FaceStartSearchButton: View {
 
                 HStack(spacing: 8.scale) {
                     Text("Start search")
-                        .font(Tokens.Font.bodySemibold16)
+                        .font(Tokens.Font.semibold16)
                         .tracking(-0.16)
 
                     Spacer()

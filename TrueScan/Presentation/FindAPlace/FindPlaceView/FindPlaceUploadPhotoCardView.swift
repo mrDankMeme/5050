@@ -26,7 +26,7 @@ struct FindPlaceUploadPhotoCardView: View {
                     .foregroundStyle(Tokens.Color.blue)
 
                 Text("Upload a photo")
-                    .font(Tokens.Font.bodySemibold16)
+                    .font(Tokens.Font.semibold16)
                     .foregroundStyle(Tokens.Color.blue)
             }
         }

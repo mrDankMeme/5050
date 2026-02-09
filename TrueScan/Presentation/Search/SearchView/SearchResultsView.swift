@@ -246,7 +246,7 @@ private struct SearchResultWebSheet: View {
         HStack(spacing: 12.scale) {
             Button(action: onClose) {
                 Text("Close")
-                    .font(Tokens.Font.bodyMedium16)
+                    .font(Tokens.Font.medium16)
                     .foregroundStyle(Tokens.Color.textPrimary)
             }
 

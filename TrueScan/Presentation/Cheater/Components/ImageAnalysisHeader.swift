@@ -54,7 +54,7 @@ struct BackButton: View {
                         .accessibilityHidden(true)
                 } else {
                     Image(systemName: "arrow.left")
-                        .font(Tokens.Font.bodySemibold20)
+                        .font(Tokens.Font.semibold20)
 
                         .foregroundColor(Tokens.Color.textPrimary)
                 }

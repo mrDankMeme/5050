@@ -32,7 +32,7 @@ public struct PrimaryButton: View {
                         .scaleEffect(1.scale)
                 } else {
                     Text(title)
-                        .font(Tokens.Font.bodySemibold16)
+                        .font(Tokens.Font.semibold16)
                         .tracking(-0.16.scale)
                         .foregroundColor(.white)
                         .lineLimit(1)

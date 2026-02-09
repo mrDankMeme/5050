@@ -424,7 +424,7 @@ struct CheaterView: View {
 
                 HStack(spacing: 8.scale) {
                     Text("Check messages")
-                        .font(Tokens.Font.bodySemibold16)
+                        .font(Tokens.Font.semibold16)
                         .tracking(-0.16)
 
                     Spacer()
@@ -476,7 +476,7 @@ private struct CheaterUploadPhotoCardView: View {
                     .foregroundStyle(Tokens.Color.blue)
 
                 Text("Upload a photo")
-                    .font(Tokens.Font.bodySemibold16)
+                    .font(Tokens.Font.semibold16)
                     .foregroundStyle(Tokens.Color.blue)
             }
         }

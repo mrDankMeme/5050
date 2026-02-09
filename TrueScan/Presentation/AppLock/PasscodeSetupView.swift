@@ -49,7 +49,7 @@ struct PasscodeSetupView: View {
                         .frame(maxWidth: .infinity, alignment: .center)
 
                     Text(step == 1 ? "Create a 4-digit passcode" : "Confirm passcode")
-                        .font(Tokens.Font.bodyMedium16)
+                        .font(Tokens.Font.medium16)
                         .foregroundStyle(Tokens.Color.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .center)
                         .padding(.top, 10.scale)
@@ -59,7 +59,7 @@ struct PasscodeSetupView: View {
 
                     if let err = errorText {
                         Text(err)
-                            .font(Tokens.Font.bodyMedium16)
+                            .font(Tokens.Font.medium16)
                             .foregroundStyle(.red)
                             .padding(.top, 10.scale)
                     }
