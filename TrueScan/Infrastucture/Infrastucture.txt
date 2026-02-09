@@ -1,0 +1,1172 @@
+////////////////////////////////////////////////////////////
+// FILE: Apphud/ApphudPaywallTracker.swift
+////////////////////////////////////////////////////////////
+
+//
+//  ApphudPaywallTracker.swift
+//  SDK: Apphud 3.6.x
+//
+
+import Foundation
+import ApphudSDK
+import StoreKit
+
+// MARK: - Трекинг показа кастомного экрана пейволла
+enum ApphudPaywallTracker {
+
+    /// Поставь реальный ID из Apphud → Product Hub → Paywalls → Identifier
+    static var paywallID: String = "main"
+
+    private static var cachedPaywall: ApphudPaywall?
+
+    static func trackShown() {
+        // Если уже кэшировали paywall — сразу шлём показ
+        if let pw = cachedPaywall {
+            Apphud.paywallShown(pw)
+            return
+        }
+
+        // В Swift 5-стиле сами гарантируем main-тред
+        DispatchQueue.main.async {
+            Apphud.paywallsDidLoadCallback { paywalls, _ in
+                guard let pw = paywalls.first(where: { $0.identifier == paywallID }) else {
+                    #if DEBUG
+                    print("[Apphud] paywall '\(paywallID)' not found")
+                    #endif
+                    return
+                }
+                cachedPaywall = pw
+                Apphud.paywallShown(pw)
+            }
+        }
+    }
+}
+
+// MARK: - Хранилище продуктов выбранного paywall
+final class ApphudPaywallsStore {
+
+    static let shared = ApphudPaywallsStore()
+    private init() {}
+
+    private(set) var productsApphud: [ApphudProduct] = []
+
+    /// Вызови при инициализации VM пейволла
+    func load(paywallID: String, completion: (() -> Void)? = nil) {
+        // Тоже уходим на main, чтобы совпадать с ожиданиями SDK
+        DispatchQueue.main.async { [weak self] in
+            Apphud.paywallsDidLoadCallback { paywalls, _ in
+                guard let self = self else { return }
+
+                if let pw = paywalls.first(where: { $0.identifier == paywallID }) {
+                    self.productsApphud = pw.products
+                } else {
+                    self.productsApphud = []
+                    #if DEBUG
+                    print("[Apphud] products not loaded: paywall '\(paywallID)' not found")
+                    #endif
+                }
+
+                completion?()
+            }
+        }
+    }
+
+    // MARK: - Хелперы для UI
+
+    func currencySymbol(for index: Int) -> String? {
+        guard index >= 0, index < productsApphud.count else { return nil }
+        return productsApphud[index].skProduct?.priceLocale.currencySymbol
+    }
+
+    func priceString(for index: Int) -> String? {
+        guard index >= 0, index < productsApphud.count else { return nil }
+        return productsApphud[index].skProduct?.price.stringValue
+    }
+
+    func periodName(for index: Int) -> String? {
+        guard index >= 0,
+              index < productsApphud.count,
+              let period = productsApphud[index].skProduct?.subscriptionPeriod else { return nil }
+
+        switch period.unit {
+        case .day:   return "Daily"
+        case .week:  return "Weekly"
+        case .month: return "Monthly"
+        case .year:  return "Yearly"
+        @unknown default: return "Unknown"
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: Networking/APIConfig.swift
+////////////////////////////////////////////////////////////
+
+//  APIConfig.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 10/29/25.
+//
+
+import Foundation
+
+/// Конфигурация API — неизменяемая, потокобезопасная.
+struct APIConfig {
+    let baseURL: URL
+    let bundleId: String
+
+    init(baseURL: URL, bundleId: String = Bundle.main.bundleIdentifier ?? "dev.cheaterbuster") {
+        self.baseURL = baseURL
+        self.bundleId = bundleId
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: Networking/MultipartFormData.swift
+////////////////////////////////////////////////////////////
+
+//  MultipartFormData.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 10/29/25.
+//
+
+import Foundation
+
+/// Сборщик multipart/form-data тела.
+struct MultipartFormData {
+    struct FilePart {
+        let name: String
+        let filename: String
+        let mimeType: String
+        let data: Data
+    }
+
+    private let boundary: String = "----CB-\(UUID().uuidString)"
+    var contentType: String { "multipart/form-data; boundary=\(boundary)" }
+
+    func build(fields: [String: String?], files: [FilePart]) -> Data {
+        var body = Data()
+
+        for (k, v) in fields {
+            guard let v = v else { continue }
+            body.appendString("--\(boundary)\r\n")
+            body.appendString("Content-Disposition: form-data; name=\"\(k)\"\r\n\r\n")
+            body.appendString("\(v)\r\n")
+        }
+
+        for f in files {
+            body.appendString("--\(boundary)\r\n")
+            body.appendString(
+                "Content-Disposition: form-data; name=\"\(f.name)\"; filename=\"\(f.filename)\"\r\n"
+            )
+            body.appendString("Content-Type: \(f.mimeType)\r\n\r\n")
+            body.append(f.data)
+            body.appendString("\r\n")
+        }
+
+        body.appendString("--\(boundary)--\r\n")
+        return body
+    }
+}
+
+// MARK: - Safe append helpers
+private extension Data {
+    mutating func appendString(_ s: String) {
+        if let d = s.data(using: .utf8) {
+            append(d)
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: Networking/URLSessionHTTPClient.swift
+////////////////////////////////////////////////////////////
+
+// Data/Network/URLSessionHTTPClient.swift
+// CheaterBuster
+
+import Foundation
+
+// URLSessionHTTPClient не хранит мутабельного состояния.
+final class URLSessionHTTPClient: HTTPClient {
+    private let session: URLSession
+
+    init(session: URLSession = .shared) {
+        self.session = session
+    }
+
+    // MARK: - Logging helpers (static, чтобы не захватывать self)
+    private static func mask(_ token: String) -> String {
+        if token.count <= 12 { return "***\(token.count)***" }
+        return "\(token.prefix(6))…\(token.suffix(6))"
+    }
+
+    private static func logRequest(_ req: URLRequest) {
+        #if DEBUG
+        let method = req.httpMethod ?? "GET"
+        let url = req.url?.absoluteString ?? "nil"
+        print("🛰 CB_HTTP → \(method) \(url)")
+        if let headers = req.allHTTPHeaderFields, !headers.isEmpty {
+            let pretty = headers.map { k, v in
+                k.lowercased() == "authorization"
+                ? "\(k): Bearer \(mask(v.replacingOccurrences(of: "Bearer ", with: "")))"
+                : "\(k): \(v)"
+            }.joined(separator: " | ")
+            print("   headers: { \(pretty) }")
+        }
+        if let ct = req.value(forHTTPHeaderField: "Content-Type") {
+            let len = req.httpBody?.count ?? 0
+            print("   body: Content-Type=\(ct), bytes=\(len)")
+        }
+        #endif
+    }
+
+    private static func logResponse(_ resp: HTTPURLResponse, data: Data) {
+        #if DEBUG
+        let code = resp.statusCode
+        let url = resp.url?.absoluteString ?? "nil"
+        let text = String(data: data, encoding: .utf8) ?? "<\(data.count) bytes>"
+        print("✅ CB_HTTP ← \(code) \(url)")
+        print("   body: \(text.prefix(2000))")
+        #endif
+    }
+
+    private static func logError(_ code: Int, data: Data) {
+        #if DEBUG
+        let text = String(data: data, encoding: .utf8) ?? "<\(data.count) bytes>"
+        print("⛔️ CB_HTTP ← \(code) BODY: \(text.prefix(2000))")
+        #endif
+    }
+
+    func send<T: Decodable>(_ request: URLRequest) async throws -> T {
+        var req = request
+        if req.value(forHTTPHeaderField: "Accept") == nil {
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+        }
+        Self.logRequest(req)
+
+        let data: Data
+        let resp: URLResponse
+        do {
+            (data, resp) = try await session.data(for: req)
+        } catch {
+            #if DEBUG
+            print("⛔️ CB_HTTP transport error: \(error.localizedDescription)")
+            #endif
+            throw APIError.transport(error)
+        }
+
+        guard let http = resp as? HTTPURLResponse else { throw APIError.noData }
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 401 {
+                Self.logError(http.statusCode, data: data)
+                throw APIError.unauthorized
+            }
+            Self.logError(http.statusCode, data: data)
+            let body = String(data: data, encoding: .utf8)
+            throw APIError.http(http.statusCode, body)
+        }
+
+        Self.logResponse(http, data: data)
+
+        do {
+            return try JSONDecoder().decode(T.self, from: data)
+        } catch {
+            #if DEBUG
+            print("⛔️ CB_HTTP decoding error: \(error)")
+            #endif
+            throw APIError.decoding(error)
+        }
+    }
+
+    func sendVoid(_ request: URLRequest) async throws {
+        var req = request
+        if req.value(forHTTPHeaderField: "Accept") == nil {
+            req.setValue("application/json", forHTTPHeaderField: "Accept")
+        }
+        Self.logRequest(req)
+
+        let (data, resp) = try await session.data(for: req)
+        guard let http = resp as? HTTPURLResponse else { throw APIError.noData }
+        guard (200..<300).contains(http.statusCode) else {
+            if http.statusCode == 401 {
+                Self.logError(http.statusCode, data: data)
+                throw APIError.unauthorized
+            }
+            Self.logError(http.statusCode, data: data)
+            let body = String(data: data, encoding: .utf8)
+            throw APIError.http(http.statusCode, body)
+        }
+
+        Self.logResponse(http, data: data)
+        _ = data
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: Permissions/PermissionsManagerImpl.swift
+////////////////////////////////////////////////////////////
+
+//
+//  PermissionsManagerImpl.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 10/31/25.
+//
+
+import Foundation
+import AppTrackingTransparency
+import AdSupport
+import Photos
+import AVFoundation
+import UserNotifications
+
+final class PermissionsManagerImpl: PermissionsManager {
+
+    // MARK: - Status
+    func status(of permission: Permission) async -> PermissionStatus {
+        switch permission {
+        case .tracking:
+            if #available(iOS 14, *) {
+                // Без MainActor.run — просто читаем статус
+                switch ATTrackingManager.trackingAuthorizationStatus {
+                case .authorized:    return .authorized
+                case .denied:        return .denied
+                case .restricted:    return .restricted
+                case .notDetermined: return .notDetermined
+                @unknown default:    return .temporarilyUnavailable
+                }
+            } else {
+                return .unsupported
+            }
+
+        case .notifications:
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            switch settings.authorizationStatus {
+            case .authorized, .provisional, .ephemeral: return .authorized
+            case .denied:        return .denied
+            case .notDetermined: return .notDetermined
+            @unknown default:    return .temporarilyUnavailable
+            }
+
+        case .photoLibrary:
+            let s = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+            switch s {
+            case .authorized, .limited: return .authorized
+            case .denied:        return .denied
+            case .restricted:    return .restricted
+            case .notDetermined: return .notDetermined
+            @unknown default:    return .temporarilyUnavailable
+            }
+
+        case .camera:
+            let s = AVCaptureDevice.authorizationStatus(for: .video)
+            switch s {
+            case .authorized:    return .authorized
+            case .denied:        return .denied
+            case .restricted:    return .restricted
+            case .notDetermined: return .notDetermined
+            @unknown default:    return .temporarilyUnavailable
+            }
+
+        case .files:
+            return .authorized
+        }
+    }
+
+    // MARK: - Request
+    func request(_ permission: Permission) async -> PermissionStatus {
+        switch permission {
+        case .tracking:
+            if #available(iOS 14, *) {
+                let current = await status(of: .tracking)
+                if current != .notDetermined { return current }
+
+                // Классический Swift 5: без Task и MainActor внутри
+                let result: PermissionStatus = await withCheckedContinuation { (cont: CheckedContinuation<PermissionStatus, Never>) in
+                    ATTrackingManager.requestTrackingAuthorization { status in
+                        let mapped: PermissionStatus
+                        switch status {
+                        case .authorized:    mapped = .authorized
+                        case .denied:        mapped = .denied
+                        case .restricted:    mapped = .restricted
+                        case .notDetermined: mapped = .notDetermined
+                        @unknown default:    mapped = .temporarilyUnavailable
+                        }
+                        cont.resume(returning: mapped)
+                    }
+                }
+
+                // Доступ к IDFA после запроса (без MainActor.run)
+                _ = ASIdentifierManager.shared().advertisingIdentifier
+                return result
+            } else {
+                return .unsupported
+            }
+
+        case .notifications:
+            let current = await status(of: .notifications)
+            if current != .notDetermined { return current }
+            do {
+                let granted = try await UNUserNotificationCenter.current()
+                    .requestAuthorization(options: [.alert, .badge, .sound])
+                return granted ? .authorized : .denied
+            } catch {
+                return .temporarilyUnavailable
+            }
+
+        case .photoLibrary:
+            let current = await status(of: .photoLibrary)
+            if current != .notDetermined { return current }
+            return await withCheckedContinuation { (cont: CheckedContinuation<PermissionStatus, Never>) in
+                PHPhotoLibrary.requestAuthorization(for: .readWrite) { s in
+                    let mapped: PermissionStatus
+                    switch s {
+                    case .authorized, .limited: mapped = .authorized
+                    case .denied:               mapped = .denied
+                    case .restricted:           mapped = .restricted
+                    case .notDetermined:        mapped = .notDetermined
+                    @unknown default:           mapped = .temporarilyUnavailable
+                    }
+                    cont.resume(returning: mapped)
+                }
+            }
+
+        case .camera:
+            let current = await status(of: .camera)
+            if current != .notDetermined { return current }
+            let granted = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+                AVCaptureDevice.requestAccess(for: .video) { granted in
+                    cont.resume(returning: granted)
+                }
+            }
+            return granted ? .authorized : .denied
+
+        case .files:
+            return .authorized
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: RateUs/RateUsScheduler.swift
+////////////////////////////////////////////////////////////
+
+//
+//  RateUsScheduler.swift
+//  CheaterBuster
+//
+
+import Foundation
+
+/// Единая точка принятия решения «показывать ли сейчас кастомный Rate Us».
+final class RateUsScheduler {
+
+    enum Reason: String {
+        case searchResults
+        case cheaterResults
+        case onboardingInitial
+    }
+
+    static let shared = RateUsScheduler()
+
+    private init() {}
+
+    // MARK: - Константы политики
+    private let minDaysBetweenShows: Int = 14
+    private let maxShowsPerYear: Int = 3
+    private let minSessionsBeforePrompt: Int = 3
+    private let minEventsBeforePrompt: Int = 2
+    private let userDefaults = UserDefaults.standard
+
+    // MARK: - Ключи
+    private let kLastShownAt = "cb.rateus.lastShownAt"
+    private let kShowsInLastYear = "cb.rateus.showsInLastYear"
+    private let kUserRated = "cb.rateus.userRated"
+    private let kSessionCount = "cb.rateus.sessionCount"
+    private let kEventCounter = "cb.rateus.eventCounter"
+
+    /// Флаг «мы уже ПЕРВЫЙ раз показали кастомный Rate Us после успешного поиска/анализа»
+    private let kFirstSearchPromptShown = "cb.rateus.firstSearchPromptShown"
+
+    /// Просто пометка, что онбординг был показан (для аналитики/логики, но больше не считаем это реальным показом RateUs)
+    private let kOnboardingShown = "cb.rateus.onboardingShown"
+
+    // Системное событие: «пора показать RateUs во вью»
+    static let willPresentNotification = Notification.Name("cb.rateus.willPresent")
+
+    // MARK: - Публичные вызовы
+
+    func request(_ reason: Reason) {
+        // Счётчик «событий» (успешных результатов и т.п.)
+        if reason == .searchResults || reason == .cheaterResults {
+            incrementCounter(forKey: kEventCounter)
+        }
+
+        // Онбординг: больше не считаем это реальным показом кастомного Rate Us,
+        // просто помечаем факт показа онбординга.
+        if reason == .onboardingInitial {
+            userDefaults.set(true, forKey: kOnboardingShown)
+            return
+        }
+
+        // 💡 Первый специальный показ:
+        // сразу после ПЕРВОГО успешного опыта — поиск (Search) ИЛИ анализ в Cheater.
+        if reason == .searchResults || reason == .cheaterResults {
+            if tryShowFirstSearchPromptIfNeeded() {
+                return
+            }
+        }
+
+        // Дальше — обычная политика (14 дней, X раз в год и т.д.)
+        guard canShowNow() else { return }
+        NotificationCenter.default.post(name: Self.willPresentNotification, object: nil)
+    }
+
+    func userDidRate() {
+        userDefaults.set(true, forKey: kUserRated)
+        markShown(now: Date())
+    }
+
+    func userDeferred() {
+        markShown(now: Date())
+    }
+
+    func bumpSessionIfNeeded() {
+        incrementCounter(forKey: kSessionCount)
+        cleanupOldYearIfNeeded()
+    }
+
+    // MARK: - Политика
+
+    /// Первый специальный показ — сразу после ПЕРВОГО успешного поиска/анализа.
+    /// Возвращает true, если показ инициирован здесь (тогда выходим из request(_:)).
+    private func tryShowFirstSearchPromptIfNeeded() -> Bool {
+        // Если пользователь уже когда-то поставил оценку — больше не мучаем.
+        if userDefaults.bool(forKey: kUserRated) {
+            return false
+        }
+
+        // Если мы уже показали первый prompt — не повторяем.
+        if userDefaults.bool(forKey: kFirstSearchPromptShown) {
+            return false
+        }
+
+        // 🔥 Показываем КАСТОМНЫЙ Rate Us сразу после первого успешного опыта
+        // (неважно, Search или Cheater).
+        userDefaults.set(true, forKey: kFirstSearchPromptShown)
+        markShown(now: Date())
+        NotificationCenter.default.post(name: Self.willPresentNotification, object: nil)
+        return true
+    }
+
+    private func canShowNow() -> Bool {
+        // Если пользователь уже оценил — больше не показываем.
+        if userDefaults.bool(forKey: kUserRated) { return false }
+
+        let sessions = userDefaults.integer(forKey: kSessionCount)
+        if sessions < minSessionsBeforePrompt { return false }
+
+        let events = userDefaults.integer(forKey: kEventCounter)
+        if events < minEventsBeforePrompt { return false }
+
+        if let last = userDefaults.object(forKey: kLastShownAt) as? Date {
+            let days = Calendar.current.dateComponents([.day], from: last, to: Date()).day ?? 0
+            if days < minDaysBetweenShows { return false }
+        }
+
+        let showsYear = userDefaults.integer(forKey: kShowsInLastYear)
+        if showsYear >= maxShowsPerYear { return false }
+
+        return true
+    }
+
+    private func markShown(now: Date) {
+        userDefaults.set(now, forKey: kLastShownAt)
+        userDefaults.set(userDefaults.integer(forKey: kShowsInLastYear) + 1,
+                         forKey: kShowsInLastYear)
+    }
+
+    private func incrementCounter(forKey key: String) {
+        userDefaults.set(userDefaults.integer(forKey: key) + 1, forKey: key)
+    }
+
+    private func cleanupOldYearIfNeeded() {
+        guard let last = userDefaults.object(forKey: kLastShownAt) as? Date else { return }
+        let days = Calendar.current.dateComponents([.day], from: last, to: Date()).day ?? 0
+        if days > 365 {
+            userDefaults.set(0, forKey: kShowsInLastYear)
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: Security/InMemoryTokenStorage.swift
+////////////////////////////////////////////////////////////
+
+//  InMemoryTokenStorage.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 10/29/25.
+//
+
+import Foundation
+
+final class InMemoryTokenStorage: TokenStorage {
+
+    private let q = DispatchQueue(label: "cb.tokens.inmemory")
+
+    private var _accessToken: String?
+    private var _userId: String?
+
+    var accessToken: String? {
+        get { q.sync { _accessToken } }
+        set { q.sync { _accessToken = newValue } }
+    }
+
+    var userId: String? {
+        get { q.sync { _userId } }
+        set { q.sync { _userId = newValue } }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: Security/KeychainTokenStorage.swift
+////////////////////////////////////////////////////////////
+
+// Infrastructure/Security/KeychainTokenStorage.swift
+// CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/6/25.
+//
+
+import Foundation
+import Security
+
+// Класс используется из разных потоков, внутри есть сериализующая очередь.
+final class KeychainTokenStorage: TokenStorage {
+
+    private let service: String
+    private let q = DispatchQueue(label: "cb.keychain.tokenstorage")
+
+    private let accountAccessToken = "cb.accessToken"
+    private let accountUserId      = "cb.userId"
+
+    private var _accessToken: String?
+    private var _userId: String?
+
+    init(service: String = Bundle.main.bundleIdentifier ?? "com.cheaterbuster.app") {
+        self.service = service + ".auth"
+        // Читаем из кейчейна синхронно при инициализации
+        self._accessToken = KeychainTokenStorage.read(account: accountAccessToken, service: self.service)
+        self._userId      = KeychainTokenStorage.read(account: accountUserId,      service: self.service)
+    }
+
+    // MARK: - TokenStorage
+
+    var accessToken: String? {
+        get { q.sync { _accessToken } }
+        set {
+            q.sync {
+                _accessToken = newValue
+                if let v = newValue {
+                    KeychainTokenStorage.write(value: v, account: accountAccessToken, service: service)
+                } else {
+                    KeychainTokenStorage.delete(account: accountAccessToken, service: service)
+                }
+            }
+        }
+    }
+
+    var userId: String? {
+        get { q.sync { _userId } }
+        set {
+            q.sync {
+                _userId = newValue
+                if let v = newValue {
+                    KeychainTokenStorage.write(value: v, account: accountUserId, service: service)
+                } else {
+                    KeychainTokenStorage.delete(account: accountUserId, service: service)
+                }
+            }
+        }
+    }
+
+    // MARK: - Keychain helpers (static, чтобы не тянуть self)
+
+    private static func query(account: String, service: String) -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account
+        ]
+    }
+
+    private static func read(account: String, service: String) -> String? {
+        var q = query(account: account, service: service)
+        q[kSecReturnData as String] = kCFBooleanTrue
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(q as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func write(value: String, account: String, service: String) {
+        let data = Data(value.utf8)
+        var q = query(account: account, service: service)
+
+        let exists = (SecItemCopyMatching(q as CFDictionary, nil) == errSecSuccess)
+        if exists {
+            let attrs = [kSecValueData as String: data]
+            _ = SecItemUpdate(q as CFDictionary, attrs as CFDictionary)
+        } else {
+            q[kSecValueData as String] = data
+            q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            _ = SecItemAdd(q as CFDictionary, nil)
+        }
+    }
+
+    private static func delete(account: String, service: String) {
+        let q = query(account: account, service: service)
+        _ = SecItemDelete(q as CFDictionary)
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: Subscription/SubscriptionServiceApphud.swift
+////////////////////////////////////////////////////////////
+
+//  SubscriptionServiceApphud.swift
+//  Реализация под Apphud 3.6.x
+
+import Foundation
+import ApphudSDK
+
+@MainActor
+final class SubscriptionServiceApphud: SubscriptionService {
+
+    private let weeklyID = "week_4.99_not_trial"
+    private let yearlyID = "yearly_39.99_not_trial"
+
+    private let store: PremiumStore
+    private let center: NotificationCenter
+
+    init(
+        store: PremiumStore,
+        center: NotificationCenter = .default
+    ) {
+        self.store = store
+        self.center = center
+    }
+
+    func purchase(plan: SubscriptionPlan) async throws {
+        let targetID: String = {
+            switch plan {
+            case .weekly: return weeklyID
+            case .yearly: return yearlyID
+            }
+        }()
+
+        guard let product = ApphudPaywallsStore.shared
+            .productsApphud
+            .first(where: { $0.productId == targetID }) else {
+            throw NSError(
+                domain: "Apphud",
+                code: 0,
+                userInfo: [NSLocalizedDescriptionKey: "Product \(targetID) not loaded"]
+            )
+        }
+
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Apphud.purchase(product) { result in
+                // Гарантируем работу на main-очереди:
+                DispatchQueue.main.async {
+                    if let error = result.error {
+                        cont.resume(throwing: error)
+                        return
+                    }
+
+                    let isActive =
+                        (result.subscription?.isActive() == true) ||
+                        (result.nonRenewingPurchase?.isActive() == true) ||
+                        Apphud.hasActiveSubscription()
+
+                    if isActive {
+                        // 1) локальный стор
+                        self.store.isPremium = true
+                        // 2) широковещательная синхронизация (PremiumStoreImpl + UserDefaults)
+                        self.center.post(
+                            name: .cbPremiumSynced,
+                            object: nil,
+                            userInfo: ["active": true]
+                        )
+
+                        cont.resume(returning: ())
+                    } else {
+                        // Можно явно проставить false, чтобы сбросить кеш, если были какие-то артефакты
+                        self.store.isPremium = false
+                        self.center.post(
+                            name: .cbPremiumSynced,
+                            object: nil,
+                            userInfo: ["active": false]
+                        )
+
+                        cont.resume(throwing: NSError(
+                            domain: "Apphud",
+                            code: 0,
+                            userInfo: [NSLocalizedDescriptionKey: "Purchase not active"]
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    func restore() async throws {
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            Apphud.restorePurchases { subscriptions, nonRenewingPurchases, error in
+                // Также уходим на main-поток
+                DispatchQueue.main.async {
+                    if let error = error {
+                        cont.resume(throwing: error)
+                        return
+                    }
+
+                    let isActive =
+                        (subscriptions?.first?.isActive() == true) ||
+                        (nonRenewingPurchases?.first?.isActive() == true) ||
+                        Apphud.hasActiveSubscription()
+
+                    if isActive {
+                        self.store.isPremium = true
+                        self.center.post(
+                            name: .cbPremiumSynced,
+                            object: nil,
+                            userInfo: ["active": true]
+                        )
+
+                        cont.resume(returning: ())
+                    } else {
+                        self.store.isPremium = false
+                        self.center.post(
+                            name: .cbPremiumSynced,
+                            object: nil,
+                            userInfo: ["active": false]
+                        )
+
+                        cont.resume(throwing: NSError(
+                            domain: "Apphud",
+                            code: 0,
+                            userInfo: [NSLocalizedDescriptionKey: "No active subscription"]
+                        ))
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: UI/FontsLock.swift
+////////////////////////////////////////////////////////////
+
+//
+//  FontsLockModifier.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/6/25.
+//
+
+import SwiftUI
+
+public struct FontsLock: ViewModifier {
+    public init() {}
+    public func body(content: Content) -> some View {
+        content
+            .environment(\.dynamicTypeSize, .large)
+            .environment(\.legibilityWeight, .regular)
+    }
+}
+
+public extension View {
+    /// Удобный шорткат для подключения глобально
+    func lockFonts() -> some View {
+        modifier(FontsLock())
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: UI/OpacityTapButtonStyle.swift
+////////////////////////////////////////////////////////////
+
+//
+//  OpacityTapButtonStyle.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/4/25.
+//
+
+
+import SwiftUI
+
+struct OpacityTapButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1.0)
+            .animation(.easeInOut(duration: 0.15), value: configuration.isPressed)
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: UI/TabBar/RoundedTabView.swift
+////////////////////////////////////////////////////////////
+
+//
+//  RoundedTabView.swift
+//  TrueScan
+//
+//  Created by Niiaz Khasanov on 11/15/25.
+//
+
+
+import SwiftUI
+
+struct RoundedTabView<Content: View>: UIViewControllerRepresentable {
+
+    let content: () -> Content
+
+    func makeUIViewController(context: Context) -> UIRoundedTabBarController {
+        let controller = UIRoundedTabBarController()
+        let hosting = UIHostingController(rootView: content())
+        controller.setViewControllers([hosting], animated: false)
+        return controller
+    }
+
+    func updateUIViewController(_ uiViewController: UIRoundedTabBarController, context: Context) {
+        if let hosting = uiViewController.viewControllers?.first as? UIHostingController<Content> {
+            hosting.rootView = content()
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: UI/TabBar/TabBarAnimator.swift
+////////////////////////////////////////////////////////////
+
+//  TabBarAnimator.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/1/25.
+//
+
+import UIKit
+
+enum TabBarAnimator {
+
+    static func set(slidDown: Bool, duration: TimeInterval = 0.25) {
+        DispatchQueue.main.async {
+            guard let tabBarController = findTabBarController() else { return }
+            let tabBar = tabBarController.tabBar
+
+            let h = tabBar.bounds.height
+            let transform = slidDown
+                ? CGAffineTransform(translationX: 0, y: h + 20)
+                : .identity
+
+            UIView.animate(withDuration: duration) {
+                tabBar.transform = transform
+            }
+        }
+    }
+
+    // MARK: - Поиск UITabBarController
+
+    private static func findTabBarController() -> UITabBarController? {
+        guard let windowScene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first,
+              let window = windowScene.keyWindow
+        else { return nil }
+
+        // В твоём приложении rootVC — UIHostingController,
+        // внутри которого живёт UITabBarController
+        return window.rootViewController as? UITabBarController
+            ?? window.rootViewController?.children.compactMap { $0 as? UITabBarController }.first
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: UI/TabBar/TabBarEnvironment.swift
+////////////////////////////////////////////////////////////
+
+
+//  TabBarEnvironment.swift
+//  CheaterBuster
+//
+//  Создаёт bridge к UITabBar и пробрасывает его высоту в SwiftUI через Environment.
+
+import SwiftUI
+import UIKit
+
+// MARK: - Environment key
+
+private struct TabBarHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
+extension EnvironmentValues {
+    /// Реальная высота системного UITabBar (0, если ещё не измерили).
+    var tabBarHeight: CGFloat {
+        get { self[TabBarHeightKey.self] }
+        set { self[TabBarHeightKey.self] = newValue }
+    }
+}
+
+// MARK: - TabBarAccessor
+
+/// Bridge в UIKit, чтобы достать UITabBar у оборачивающего UITabBarController.
+struct TabBarAccessor: UIViewControllerRepresentable {
+    var callback: (UITabBar) -> Void
+    private let proxyController = ViewController()
+
+    func makeUIViewController(
+        context: UIViewControllerRepresentableContext<TabBarAccessor>
+    ) -> UIViewController {
+        proxyController.callback = callback
+        return proxyController
+    }
+
+    func updateUIViewController(
+        _ uiViewController: UIViewController,
+        context: UIViewControllerRepresentableContext<TabBarAccessor>
+    ) {
+        // ничего не делаем
+    }
+
+    private final class ViewController: UIViewController {
+        var callback: (UITabBar) -> Void = { _ in }
+
+        override func viewWillAppear(_ animated: Bool) {
+            super.viewWillAppear(animated)
+
+            if let tabBar = self.tabBarController?.tabBar {
+                callback(tabBar)
+            }
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: UI/TabBar/TabBarTransparencyAnimator.swift
+////////////////////////////////////////////////////////////
+
+//  TabBarTransparencyAnimator.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/15/25.
+//
+
+import UIKit
+
+enum TabBarTransparencyAnimator {
+
+    static func setTransparent(_ transparent: Bool, duration: TimeInterval = 0.25) {
+        DispatchQueue.main.async {
+            guard let tabBarController = findTabBarController() else { return }
+            let tabBar = tabBarController.tabBar
+
+            let alpha: CGFloat = transparent ? 0.0 : 1.0
+            UIView.animate(withDuration: duration) {
+                tabBar.alpha = alpha
+            }
+        }
+    }
+
+    // MARK: - Поиск UITabBarController
+
+    private static func findTabBarController() -> UITabBarController? {
+        guard let windowScene = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .first,
+              let window = windowScene.keyWindow
+        else { return nil }
+
+        return window.rootViewController as? UITabBarController
+            ?? window.rootViewController?.children.compactMap { $0 as? UITabBarController }.first
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: UI/TabBar/UIRoundedTabBarController.swift
+////////////////////////////////////////////////////////////
+
+//
+//  UIRoundedTabBarController.swift
+//  TrueScan
+//
+//  Created by Niiaz Khasanov on 11/15/25.
+//
+
+
+import UIKit
+
+final class UIRoundedTabBarController: UITabBarController {
+
+    private let shadowId = "RoundedTabBarShadow"
+
+    override func viewWillLayoutSubviews() {
+        super.viewWillLayoutSubviews()
+
+        let tabBar = self.tabBar
+
+        // Скругления по верхним углам
+        tabBar.layer.cornerRadius = 28
+        tabBar.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        tabBar.layer.masksToBounds = true
+
+        addShadowBelow(tabBar: tabBar)
+    }
+
+    private func addShadowBelow(tabBar: UITabBar) {
+        if let shadow = view.subviews.first(where: { $0.accessibilityIdentifier == shadowId }) {
+            shadow.frame = tabBar.frame
+            return
+        }
+
+        let shadowView = UIView(frame: tabBar.frame)
+        shadowView.accessibilityIdentifier = shadowId
+
+        shadowView.backgroundColor = tabBar.backgroundColor ?? .white
+        shadowView.layer.cornerRadius = tabBar.layer.cornerRadius
+        shadowView.layer.maskedCorners = tabBar.layer.maskedCorners
+        shadowView.layer.masksToBounds = false
+
+        shadowView.layer.shadowColor = UIColor.black.withAlphaComponent(0.12).cgColor
+        shadowView.layer.shadowOpacity = 1
+        shadowView.layer.shadowOffset = CGSize(width: 0, height: -4)
+        shadowView.layer.shadowRadius = 16
+
+        view.addSubview(shadowView)
+        view.bringSubviewToFront(tabBar)
+    }
+}
+
+

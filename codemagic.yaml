@@ -1,0 +1,63 @@
+workflows:
+  ios-native-quick-start:
+    name: iOS Native
+    max_build_duration: 120
+    instance_type: mac_mini_m1
+
+    integrations:
+      app_store_connect: TrueScan
+
+    environment:
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.vit.5007ch4at4r
+      vars:
+        BUNDLE_ID: "com.vit.5007ch4at4r"
+        XCODE_PROJECT: "TrueScan.xcodeproj"
+        XCODE_SCHEME: "TrueScan"
+        APP_STORE_APPLE_ID: 6754932160
+      xcode: 16.4
+
+    scripts:
+      - name: Resolve Swift Package Manager dependencies
+        script: |
+          xcodebuild -resolvePackageDependencies \
+            -project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME"
+
+      - name: Set up provisioning profiles settings on Xcode project
+        script: |
+          xcode-project use-profiles \
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT"
+
+      - name: Increment build number
+        script: |
+          cd "$CM_BUILD_DIR/$(dirname "$XCODE_PROJECT")"
+          LATEST_BUILD_NUMBER=$(app-store-connect get-latest-app-store-build-number "$APP_STORE_APPLE_ID" || echo "0")
+          [[ "$LATEST_BUILD_NUMBER" =~ ^[0-9]+$ ]] || LATEST_BUILD_NUMBER=0
+          agvtool new-version -all $((LATEST_BUILD_NUMBER + 1))
+
+      - name: Build ipa for distribution
+        script: |
+          xcode-project build-ipa \
+            --project "$CM_BUILD_DIR/$XCODE_PROJECT" \
+            --scheme "$XCODE_SCHEME" \
+
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.app
+      - $HOME/Library/Developer/Xcode/DerivedData/**/Build/**/*.dSYM
+
+    publishing:
+      email:
+        recipients:
+          - kryewn@gmail.com
+        notify:
+          success: true
+          failure: false
+
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: false

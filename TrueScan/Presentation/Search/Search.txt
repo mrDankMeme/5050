@@ -1,0 +1,2274 @@
+////////////////////////////////////////////////////////////
+// FILE: CGRect+CropHelpers.swift
+////////////////////////////////////////////////////////////
+
+
+
+//
+//  CGRect+CropHelpers.swift
+//  CheaterBuster
+//
+
+import CoreGraphics
+
+extension CGRect {
+    func clamped(to bounds: CGRect, minSide: CGFloat) -> CGRect {
+        var r = self
+        r.size.width = max(r.size.width, minSide)
+        r.size.height = max(r.size.height, minSide)
+        if r.width > bounds.width { r.size.width = bounds.width }
+        if r.height > bounds.height { r.size.height = bounds.height }
+        if r.minX < bounds.minX { r.origin.x = bounds.minX }
+        if r.minY < bounds.minY { r.origin.y = bounds.minY }
+        if r.maxX > bounds.maxX { r.origin.x = bounds.maxX - r.width }
+        if r.maxY > bounds.maxY { r.origin.y = bounds.maxY - r.height }
+        return r.integral
+    }
+
+    func normalizedPositive() -> CGRect {
+        var r = self
+        if r.width < 0 { r.origin.x += r.width; r.size.width = abs(r.width) }
+        if r.height < 0 { r.origin.y += r.height; r.size.height = abs(r.height) }
+        return r
+    }
+
+    func fitting(minSide: CGFloat) -> CGRect {
+        var r = self
+        let w = max(minSide, min(r.width, r.width))
+        let h = max(minSide, min(r.height, r.height))
+        let cx = r.midX, cy = r.midY
+        r.size = CGSize(width: w, height: h)
+        r.origin = CGPoint(x: cx - w/2, y: cy - h/2)
+        return r.integral
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: CropOverlayHost.swift
+////////////////////////////////////////////////////////////
+
+//
+//  CropHandle.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/2/25.
+//
+
+
+//
+//  CropOverlayHost.swift
+//  CheaterBuster
+//
+
+import SwiftUI
+
+enum CropHandle {
+    case none, move, tl, tr, bl, br, top, bottom, left, right
+}
+
+struct CropOverlayHost: View {
+    @Binding var isCropping: Bool
+    @Binding var cropRect: CGRect
+
+    let previewSize: CGSize
+    let rotationAngle: Angle
+    let userZoom: CGFloat
+    let minCropSize: CGFloat
+    let cropInset: CGFloat
+
+    let imageVisibleRect: (_ container: CGSize, _ rotatedImageSize: CGSize) -> CGRect
+    let rotatedBaseSize: () -> CGSize
+    let initialCropRect: (_ container: CGSize, _ image: UIImage, _ rotation: Angle, _ zoom: CGFloat) -> CGRect
+
+    // Состояние жеста
+    @State private var activeHandle: CropHandle = .none
+    @State private var dragStartRect: CGRect = .zero
+    @State private var dragStartPoint: CGPoint = .zero
+
+    // Хит-зоны (со скейлом)
+    private let edgeHit: CGFloat = 22.scale
+    private let cornerHit: CGFloat = 28.scale
+
+    var body: some View {
+        let visibleRect = imageVisibleRect(previewSize, rotatedBaseSize())
+
+        Group {
+            if isCropping {
+                ZStack {
+                    CropOverlayView(cropRect: cropRect, lineWidth: 2.scale)
+
+                    // Единый перехватчик жестов по всему холсту
+                    Rectangle()
+                        .fill(Color.clear)
+                        .contentShape(Rectangle())
+                        .gesture(globalDrag(in: visibleRect))
+                }
+                .onAppear {
+                    var t = Transaction(); t.disablesAnimations = true
+                    withTransaction(t) {
+                        cropRect = cropRect.isEmpty
+                        ? visibleRect.insetBy(dx: cropInset, dy: cropInset).fitting(minSide: minCropSize)
+                        : cropRect.clamped(to: visibleRect, minSide: minCropSize)
+                    }
+                }
+            }
+        }
+        .animation(.spring(response: 0.25, dampingFraction: 0.9), value: isCropping)
+    }
+
+    // MARK: выбор хэндла
+    private func handle(at p: CGPoint, in rect: CGRect) -> CropHandle {
+        // Углы
+        let tl = CGRect(x: rect.minX - cornerHit, y: rect.minY - cornerHit, width: 2 * cornerHit, height: 2 * cornerHit)
+        let tr = CGRect(x: rect.maxX - cornerHit, y: rect.minY - cornerHit, width: 2 * cornerHit, height: 2 * cornerHit)
+        let bl = CGRect(x: rect.minX - cornerHit, y: rect.maxY - cornerHit, width: 2 * cornerHit, height: 2 * cornerHit)
+        let br = CGRect(x: rect.maxX - cornerHit, y: rect.maxY - cornerHit, width: 2 * cornerHit, height: 2 * cornerHit)
+        if tl.contains(p) { return .tl }
+        if tr.contains(p) { return .tr }
+        if bl.contains(p) { return .bl }
+        if br.contains(p) { return .br }
+
+        // Рёбра
+        let top = CGRect(x: rect.minX + edgeHit, y: rect.minY - edgeHit, width: max(0, rect.width - 2 * edgeHit), height: 2 * edgeHit)
+        let bottom = CGRect(x: rect.minX + edgeHit, y: rect.maxY - edgeHit, width: max(0, rect.width - 2 * edgeHit), height: 2 * edgeHit)
+        let left = CGRect(x: rect.minX - edgeHit, y: rect.minY + edgeHit, width: 2 * edgeHit, height: max(0, rect.height - 2 * edgeHit))
+        let right = CGRect(x: rect.maxX - edgeHit, y: rect.minY + edgeHit, width: 2 * edgeHit, height: max(0, rect.height - 2 * edgeHit))
+        if top.contains(p) { return .top }
+        if bottom.contains(p) { return .bottom }
+        if left.contains(p) { return .left }
+        if right.contains(p) { return .right }
+
+        // Внутри рамки — перемещение
+        if rect.contains(p) { return .move }
+        return .none
+    }
+
+    // MARK: единый жест
+    private func globalDrag(in bounds: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if activeHandle == .none {
+                    activeHandle = handle(at: value.startLocation, in: cropRect)
+                    dragStartRect = cropRect
+                    dragStartPoint = value.startLocation
+                }
+                guard activeHandle != .none else { return }
+
+                let dx = value.location.x - dragStartPoint.x
+                let dy = value.location.y - dragStartPoint.y
+                var r = dragStartRect
+
+                switch activeHandle {
+                case .move:
+                    r.origin.x += dx; r.origin.y += dy
+                case .tl:
+                    r.origin.x += dx; r.origin.y += dy
+                    r.size.width  -= dx; r.size.height -= dy
+                case .tr:
+                    r.origin.y += dy
+                    r.size.width  += dx; r.size.height -= dy
+                case .bl:
+                    r.origin.x += dx
+                    r.size.width  -= dx; r.size.height += dy
+                case .br:
+                    r.size.width  += dx; r.size.height += dy
+                case .top:
+                    r.origin.y += dy; r.size.height -= dy
+                case .bottom:
+                    r.size.height += dy
+                case .left:
+                    r.origin.x += dx; r.size.width -= dx
+                case .right:
+                    r.size.width += dx
+                case .none:
+                    break
+                }
+
+                r = r.normalizedPositive().clamped(to: bounds, minSide: minCropSize)
+
+                var t = Transaction(); t.disablesAnimations = true
+                withTransaction(t) { cropRect = r }
+            }
+            .onEnded { _ in activeHandle = .none }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: CropOverlayView.swift
+////////////////////////////////////////////////////////////
+
+//
+//  CropOverlayView.swift
+//  CheaterBuster
+//
+
+import SwiftUI
+
+/// Затемнение + «дырка» по cropRect + розовая рамка + утолщённые уголки
+struct CropOverlayView: View {
+    let cropRect: CGRect
+    let lineWidth: CGFloat
+
+    private let cornerLength: CGFloat = 22   // базовая длина «ножки» угла (до скейла)
+    private let cornerThickness: CGFloat = 6 // базовая толщина уголка (до скейла)
+
+    var body: some View {
+        GeometryReader { geo in
+            // Локальные скейленые размеры
+            let L = cornerLength.scale        // длина «ножки» уголка
+            let t = cornerThickness.scale     // толщина уголка
+            let lw = lineWidth.scale          // толщина основной рамки
+
+            ZStack {
+                // затемнение + вырез
+                Path { path in
+                    path.addRect(CGRect(origin: .zero, size: geo.size))
+                    path.addRect(cropRect)
+                }
+                .fill(Color.black.opacity(0.5), style: FillStyle(eoFill: true))
+
+                // основная рамка
+                RoundedRectangle(cornerRadius: 0)
+                    .stroke(Tokens.Color.accent, lineWidth: lw)
+                    .frame(width: cropRect.width, height: cropRect.height)
+                    .position(x: cropRect.midX, y: cropRect.midY)
+
+                // уголки
+                corner(.topLeft,     L: L, t: t)
+                corner(.topRight,    L: L, t: t)
+                corner(.bottomLeft,  L: L, t: t)
+                corner(.bottomRight, L: L, t: t)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+
+    private enum Corner { case topLeft, topRight, bottomLeft, bottomRight }
+
+    @ViewBuilder
+    private func corner(_ c: Corner, L: CGFloat, t: CGFloat) -> some View {
+        let w = cropRect.width, h = cropRect.height
+        let x = cropRect.minX,  y = cropRect.minY
+
+        switch c {
+        case .topLeft:
+            Group {
+                RoundedRectangle(cornerRadius: (t / 2).scale)
+                    .fill(Tokens.Color.accent)
+                    .frame(width: L, height: t)
+                    .position(x: x + L / 2, y: y + t / 2)
+                RoundedRectangle(cornerRadius: (t / 2).scale)
+                    .fill(Tokens.Color.accent)
+                    .frame(width: t, height: L)
+                    .position(x: x + t / 2, y: y + L / 2)
+            }
+        case .topRight:
+            Group {
+                RoundedRectangle(cornerRadius: (t / 2).scale)
+                    .fill(Tokens.Color.accent)
+                    .frame(width: L, height: t)
+                    .position(x: x + w - L / 2, y: y + t / 2)
+                RoundedRectangle(cornerRadius: (t / 2).scale)
+                    .fill(Tokens.Color.accent)
+                    .frame(width: t, height: L)
+                    .position(x: x + w - t / 2, y: y + L / 2)
+            }
+        case .bottomLeft:
+            Group {
+                RoundedRectangle(cornerRadius: (t / 2).scale)
+                    .fill(Tokens.Color.accent)
+                    .frame(width: L, height: t)
+                    .position(x: x + L / 2, y: y + h - t / 2)
+                RoundedRectangle(cornerRadius: (t / 2).scale)
+                    .fill(Tokens.Color.accent)
+                    .frame(width: t, height: L)
+                    .position(x: x + t / 2, y: y + h - L / 2)
+            }
+        case .bottomRight:
+            Group {
+                RoundedRectangle(cornerRadius: (t / 2).scale)
+                    .fill(Tokens.Color.accent)
+                    .frame(width: L, height: t)
+                    .position(x: x + w - L / 2, y: y + h - t / 2)
+                RoundedRectangle(cornerRadius: (t / 2).scale)
+                    .fill(Tokens.Color.accent)
+                    .frame(width: t, height: L)
+                    .position(x: x + w - t / 2, y: y + h - L / 2)
+            }
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: FacePreviewCanvas.swift
+////////////////////////////////////////////////////////////
+
+//
+//  FacePreviewCanvas.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/2/25.
+//
+
+
+//
+//  FacePreviewCanvas.swift
+//  CheaterBuster
+//
+
+import SwiftUI
+
+struct FacePreviewCanvas: View {
+    let image: UIImage?
+
+    @Binding var rotationAngle: Angle
+    @Binding var userZoom: CGFloat
+    @Binding var isCropping: Bool
+    @Binding var cropRect: CGRect
+    @Binding var previewSize: CGSize
+
+    let minCropSize: CGFloat
+    let cropInset: CGFloat
+
+    // Инъекции функций из FaceSearchView
+    let imageVisibleRect: (_ container: CGSize, _ rotatedImageSize: CGSize) -> CGRect
+    let rotatedBaseSize: () -> CGSize
+    let initialCropRect: (_ container: CGSize, _ image: UIImage, _ rotation: Angle, _ zoom: CGFloat) -> CGRect
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                if let uiImage = image {
+                    let baseSize: CGSize = {
+                        let deg = abs(Int(rotationAngle.degrees)) % 360
+                        let swap = (deg == 90 || deg == 270)
+                        return CGSize(width: swap ? uiImage.size.height : uiImage.size.width,
+                                      height: swap ? uiImage.size.width  : uiImage.size.height)
+                    }()
+
+                    let scale: CGFloat = {
+                        let s = min(geo.size.width / baseSize.width, geo.size.height / baseSize.height)
+                        return s * userZoom
+                    }()
+
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .frame(width: uiImage.size.width, height: uiImage.size.height)
+                        .rotationEffect(rotationAngle)
+                        .scaleEffect(scale)
+                        .frame(width: geo.size.width, height: geo.size.height)
+
+                    CropOverlayHost(
+                        isCropping: $isCropping,
+                        cropRect: $cropRect,
+                        previewSize: geo.size,
+                        rotationAngle: rotationAngle,
+                        userZoom: userZoom,
+                        minCropSize: minCropSize,
+                        cropInset: cropInset,
+                        imageVisibleRect: imageVisibleRect,
+                        rotatedBaseSize: rotatedBaseSize,
+                        initialCropRect: initialCropRect
+                    )
+                } else {
+                    ContentUnavailableView(
+                        "Select a photo",
+                        systemImage: "photo",
+                        description: Text("Pick one image to search by face.")
+                    )
+                }
+            }
+            .onAppear { previewSize = geo.size }
+            .onChange(of: geo.size) { _, new in previewSize = new }
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: FaceSearchComponents.swift
+////////////////////////////////////////////////////////////
+
+//
+//  HeaderBar.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/2/25.
+//
+
+
+import SwiftUI
+
+struct HeaderBar: View {
+    let title: String
+    let onBack: () -> Void
+    var body: some View {
+        HStack {
+            BackButton(size: 44.scale) { onBack() }
+            Spacer()
+            Text(title)
+                .font(Tokens.Font.bodyMedium18)
+                .foregroundStyle(Color(hex: "#141414"))
+            Spacer()
+            Color.clear.frame(width: 44.scale, height: 44.scale)
+        }
+        .padding(.horizontal, 16.scale)
+        .padding(.top, 16.scale)
+    }
+}
+
+struct ControlButton: View {
+    let asset: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 22.scale, style: .continuous)
+                    .fill(Color.white)
+                    .frame(width: 48.scale, height: 48.scale)
+                    .shadow(color: Color.black.opacity(0.06), radius: 6.scale)
+
+                Image(asset)
+                    .resizable()
+                    .renderingMode(.template)
+                    .scaledToFit()
+                    .frame(width: 20.scale, height: 20.scale)
+                    .foregroundStyle(Color(hex: "#141414"))
+            }
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 22.scale, style: .continuous))
+    }
+}
+
+struct NextButton: View {
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            ZStack {
+                Circle()
+                    .fill(Tokens.Color.accent)
+                    .frame(width: 48.scale, height: 48.scale)
+                    .shadow(color: Tokens.Color.shadowBlack7, radius: 12.scale)
+                    .shadow(color: Tokens.Color.shadowBlack7.opacity(0.6), radius: 4.scale)
+
+                Image("nextArrow")
+                    .resizable()
+                    .renderingMode(.template)
+                    .scaledToFit()
+                    .frame(width: 20.scale, height: 20.scale)
+                    .foregroundStyle(.white)
+            }
+        }
+        .buttonStyle(.plain)
+        .contentShape(Circle())
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: FaceSearchView.swift
+////////////////////////////////////////////////////////////
+
+//  FaceSearchView.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/01/25.
+//
+
+import SwiftUI
+import PhotosUI
+import Swinject
+import UIKit
+
+struct FaceSearchView: View {
+
+    // MARK: - Local types
+
+    enum SearchTarget {
+        case woman
+        case man
+
+        var title: String {
+            switch self {
+            case .woman: return "Woman"
+            case .man:   return "Man"
+            }
+        }
+    }
+
+    // MARK: - Deps
+
+    @ObservedObject var vm: SearchViewModel
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.resolver) private var resolver
+
+    /// Фото, которое пришло из SearchScreen (Upload Photo).
+    @Environment(\.selectedFaceImage) private var initialImage: UIImage?
+
+    // MARK: - Photo picker
+
+    @State private var item: PhotosPickerItem?
+    @State private var image: UIImage?
+
+    // Пикер открываем только когда нет initialImage
+    @State private var showPhotoPicker: Bool = false
+    @State private var didSelectPhoto: Bool = false
+
+    // MARK: - Rotation / zoom
+
+    @State private var rotationAngle: Angle = .zero
+    @State private var userZoom: CGFloat = 1.0
+
+    // MARK: - LoadingView navigation
+
+    @State private var showLoading: Bool = false
+    @State private var loadingPreview: UIImage? = nil
+
+    /// JPEG-данные, которые передаём в LoadingView,
+    /// чтобы он уже сам решил, когда дернуть runImageSearch.
+    @State private var loadingJPEG: Data? = nil
+
+    let onFinished: () -> Void  // из SearchScreen: path.append(.results)
+
+    // MARK: - Crop state
+
+    @State private var isCropping: Bool = false
+    @State private var cropRect: CGRect = .zero
+    @State private var previewSize: CGSize = .zero
+
+    private let minCropSize: CGFloat = 120
+    private let cropInset: CGFloat = 16
+
+    private var minCropSizeScaled: CGFloat { minCropSize.scale }
+    private var cropInsetScaled: CGFloat { cropInset.scale }
+
+    // MARK: - Gender selection
+
+    @State private var selectedTarget: SearchTarget = .man
+
+    // MARK: - Init
+
+    init(vm: SearchViewModel, onFinished: @escaping () -> Void) {
+        self.vm = vm
+        self.onFinished = onFinished
+    }
+
+    // MARK: - Body
+
+    var body: some View {
+        // ==== safeArea + тип устройства через DeviceLayout ====
+        let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+        let window = windowScene?.windows.first(where: { $0.isKeyWindow })
+
+        let topInset = window?.safeAreaInsets.top ?? 0
+
+        let baseTopPadding: CGFloat = 20.scale
+
+        // 🔝 безопасный верхний отступ
+        let safeTopPadding: CGFloat = {
+            switch DeviceLayout.type {
+            case .smallStatusBar:
+                return 90.scale
+            case .notch, .dynamicIsland:
+                return max(topInset, 60.scale)
+            case .unknown:
+                return max(topInset, 20.scale)
+            }
+        }()
+
+        let imageHeight: CGFloat = {
+            switch DeviceLayout.type {
+            case .smallStatusBar:
+                return 300.scale
+            case .notch, .dynamicIsland:
+                return 430.scale
+            case .unknown:
+                return 430.scale
+            }
+        }()
+
+        return ZStack {
+            Tokens.Color.backgroundMain.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                HeaderBar(title: "Search by photo") { dismiss() }
+                    
+                
+
+                // MARK: - Question + gender selector
+                VStack(alignment: .leading, spacing: 16.scale) {
+                    Text("Who are you searching for?")
+                        .font(Tokens.Font.medium20)
+                        .foregroundStyle(Tokens.Color.textPrimary)
+
+                    genderSelector
+                }
+                .padding(.horizontal, 24.scale)
+                .padding(.top,  12.scale)
+                .padding(.bottom, 8.scale)
+
+                // MARK: - Preview
+                FacePreviewCanvas(
+                    image: image,
+                    rotationAngle: $rotationAngle,
+                    userZoom: $userZoom,
+                    isCropping: $isCropping,
+                    cropRect: $cropRect,
+                    previewSize: $previewSize,
+                    minCropSize: minCropSizeScaled,
+                    cropInset: cropInsetScaled,
+                    imageVisibleRect: imageVisibleRect(in:rotatedImageSize:),
+                    rotatedBaseSize: rotatedBaseSize,
+                    initialCropRect: initialCropRect(for:image:rotation:zoom:)
+                )
+                .frame(height: imageHeight)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 24.scale)
+                .padding(.vertical, 8.scale)
+
+                Spacer(minLength: 0)
+            }
+            .padding(.top, safeTopPadding.scale + (DeviceLayout.isSmallStatusBarPhone ? 0.scale : 24.scale))
+        }
+        .navigationBarBackButtonHidden(true)
+        .buttonStyle(OpacityTapButtonStyle())
+
+        // MARK: - Нижняя панель (через safeAreaInset)
+
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 32.scale) {
+
+                // три контрол-кнопки
+                HStack(spacing: 24.scale) {
+                    ControlButton(asset: "rotateLeft") {
+                        withAnimation { rotationAngle -= .degrees(90) }
+                    }
+
+                    ControlButton(asset: "rotateRight") {
+                        withAnimation { rotationAngle += .degrees(90) }
+                    }
+
+                    ControlButton(asset: "resize") {
+                        if isCropping == false {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                                isCropping = true
+                            }
+                            if let img = image {
+                                var t = Transaction(); t.disablesAnimations = true
+                                withTransaction(t) {
+                                    cropRect = initialCropRect(
+                                        for: previewSize,
+                                        image: img,
+                                        rotation: rotationAngle,
+                                        zoom: userZoom
+                                    )
+                                }
+                            }
+                        } else {
+                            withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                                isCropping = false
+                            }
+                        }
+                    }
+                }
+
+                // кнопка Start search в стиле SearchScreen
+                FaceStartSearchButton(
+                    isEnabled: image != nil,
+                    action: {
+                        guard let img = image else { return }
+                        runSearchPipeline(with: img)
+                    }
+                )
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.horizontal, 24.scale)
+            .padding(.top, baseTopPadding)
+            .padding(.bottom, 110.scale)
+            .background(Tokens.Color.surfaceCard)
+        }
+
+        // MARK: - Photos picker
+
+        .photosPicker(
+            isPresented: $showPhotoPicker,
+            selection: $item,
+            matching: .images
+        )
+        .onChange(of: item) { _, newValue in
+            didSelectPhoto = newValue != nil
+
+            Task { @MainActor in
+                guard let data = try? await newValue?.loadTransferable(type: Data.self),
+                      let img = UIImage(data: data) else { return }
+                image = img
+                rotationAngle = .zero
+                userZoom = 1.0
+                isCropping = false
+            }
+        }
+        .onChange(of: showPhotoPicker) { wasPresented, isPresented in
+            if wasPresented && !isPresented && didSelectPhoto == false && image == nil {
+                // только если нет фото совсем — уходим назад
+                dismiss()
+            }
+        }
+
+        // MARK: - Переход на LoadingView
+
+        .navigationDestination(isPresented: $showLoading) {
+            LoadingView(
+                mode: .face,
+                previewImage: loadingPreview,
+                imageJPEGData: loadingJPEG,
+                vm: vm,
+                onFinished: {
+                    onFinished()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        showLoading = false
+                    }
+                }
+            )
+            .navigationBarBackButtonHidden(true)
+            .toolbar(.hidden, for: .navigationBar)
+            .transaction { t in t.animation = nil }
+            .transition(.identity)
+        }
+
+        // MARK: - Инициализация изображения
+
+        .onAppear {
+            if image == nil, let initial = initialImage {
+                // фото пришло из SearchScreen
+                image = initial
+                rotationAngle = .zero
+                userZoom = 1.0
+                isCropping = false
+            } else if image == nil && initialImage == nil {
+                // старый флоу — открываем пикер
+                showPhotoPicker = true
+            }
+        }
+    }
+}
+
+// MARK: - Gender selector UI
+
+private extension FaceSearchView {
+
+    var genderSelector: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 22.scale, style: .continuous)
+                .fill(Color.white)
+                .shadow(color: Color.black.opacity(0.06), radius: 6.scale)
+
+            HStack(spacing: 0) {
+                genderSegment(.woman)
+                genderSegment(.man)
+            }
+            .padding(4.scale)
+        }
+        .frame(width: 343.scale, height: 47.scale)
+    }
+
+    func genderSegment(_ target: SearchTarget) -> some View {
+        let isSelected = (target == selectedTarget)
+
+        return Button {
+            withAnimation(.spring(response: 0.25, dampingFraction: 0.9)) {
+                selectedTarget = target
+            }
+        } label: {
+            Text(target.title)
+                .font(Tokens.Font.bodySemibold16)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .foregroundStyle(isSelected ? Color.white : Tokens.Color.textPrimary)
+                .background(
+                    RoundedRectangle(cornerRadius: 22.scale, style: .continuous)
+                        .fill(isSelected ? Tokens.Color.accent : Color.white)
+                )
+        }
+        .buttonStyle(.plain)
+        .contentShape(RoundedRectangle(cornerRadius: 22.scale, style: .continuous))
+    }
+}
+
+// MARK: - Start search button (Face)
+
+private struct FaceStartSearchButton: View {
+    let isEnabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            if isEnabled { action() }
+        } label: {
+            HStack(spacing: 8.scale) {
+                Text("Start search")
+                    .font(Tokens.Font.bodySemibold16)
+                    .tracking(-0.16)
+
+                Spacer()
+
+                Image("nextArrow")
+                    .resizable()
+                    .renderingMode(.template)
+                    .scaledToFit()
+                    .frame(width: 20.scale, height: 20.scale)
+            }
+            .foregroundColor(.white)
+            .padding(.leading, 20.scale)
+            .padding(.trailing, 24.scale)
+            .frame(width: 343.scale, height: 51.scale, alignment: .center)
+            .background(
+                Tokens.Color.accent.opacity(isEnabled ? 1.0 : 0.5)
+            )
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: Tokens.Radius.pill,
+                    style: .continuous
+                )
+            )
+        }
+        .buttonStyle(OpacityTapButtonStyle())
+        .frame(maxWidth: .infinity, alignment: .center)
+        .disabled(!isEnabled)
+    }
+}
+
+// MARK: - Поисковый пайплайн
+
+private extension FaceSearchView {
+    func runSearchPipeline(with img: UIImage) {
+        // 1) Делаем финальную картинку (кроп + ротейт)
+        let finalImage: UIImage = ImageCropper.editedImage(
+            source: img,
+            imageViewSize: previewSize,
+            rotation: rotationAngle,
+            userZoom: userZoom,
+            imageOffset: .zero,
+            cropRectInView: cropRect,
+            isCropping: isCropping
+        ) ?? img
+
+        // 2) Готовим превью и JPEG для LoadingView
+        loadingPreview = finalImage
+        loadingJPEG = finalImage.jpegData(compressionQuality: 0.85)
+
+        // 3) Аналитика — как и раньше
+        Analytics.shared.track("search_face_total")
+
+        switch selectedTarget {
+        case .woman:
+            Analytics.shared.track("search_face_woman")
+        case .man:
+            Analytics.shared.track("search_face_man")
+        }
+
+        // 4) НЕ вызываем здесь runImageSearch.
+        //    Реальный запрос делается только в LoadingView, когда:
+        //    - пользователь уже премиум, или
+        //    - он купил премиум на Paywall.
+        showLoading = true
+    }
+}
+
+// MARK: - Geometry helpers
+
+private extension FaceSearchView {
+    func imageVisibleRect(in container: CGSize, rotatedImageSize: CGSize) -> CGRect {
+        let s = min(container.width / rotatedImageSize.width,
+                    container.height / rotatedImageSize.height)
+        let drawSize = CGSize(width: rotatedImageSize.width * s * userZoom,
+                              height: rotatedImageSize.height * s * userZoom)
+        let origin = CGPoint(x: (container.width - drawSize.width) / 2.0,
+                             y: (container.height - drawSize.height) / 2.0)
+        let imgRect = CGRect(origin: origin, size: drawSize)
+        return imgRect.intersection(CGRect(origin: .zero, size: container)).integral
+    }
+
+    func rotatedBaseSize() -> CGSize {
+        guard let img = image else { return .zero }
+        let deg = (abs(Int(rotationAngle.degrees)) % 360 + 360) % 360
+        let swap = (deg == 90 || deg == 270)
+        return CGSize(width: swap ? img.size.height : img.size.width,
+                      height: swap ? img.size.width  : img.size.height)
+    }
+
+    func initialCropRect(for container: CGSize, image: UIImage, rotation: Angle, zoom: CGFloat) -> CGRect {
+        let visible = imageVisibleRect(in: container, rotatedImageSize: rotatedBaseSize())
+        var r = visible.insetBy(dx: cropInsetScaled, dy: cropInsetScaled)
+        if r.width < minCropSizeScaled || r.height < minCropSizeScaled {
+            r = visible.fitting(minSide: minCropSizeScaled)
+        }
+        return r.integral
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: ImageCropper.swift
+////////////////////////////////////////////////////////////
+
+//  ImageCropper.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/02/25.
+//
+
+import UIKit
+import SwiftUI
+import CoreGraphics
+
+// MARK: - ImageCropper
+/// Единый конвейер «как в превью»:
+/// 1) нормализация ориентации (EXIF -> .up),
+/// 2) поворот на угол из SwiftUI (положительный = по часовой),
+/// 3) (опционально) кроп по рамке, заданной во view-координатах,
+/// 4) все преобразования через CGAffineTransform + inverse — без хардкод-кейсов 90/180/270.
+struct ImageCropper {
+
+    // MARK: - Публичный конвейер
+    static func editedImage(
+        source original: UIImage,
+        imageViewSize: CGSize,
+        rotation: Angle,
+        userZoom: CGFloat,
+        imageOffset: CGPoint,
+        cropRectInView: CGRect,
+        isCropping: Bool
+    ) -> UIImage? {
+
+        // 0) Нормализуем EXIF-ориентацию → пиксели как на экране, imageOrientation = .up
+        let normalized = original.normalizedOrientation()
+
+        // 1) Физический поворот bitmap (уже нормализованного).
+        // SwiftUI: +angle = визуально по часовой. В CoreGraphics используем отрицательный угол,
+        // чтобы визуальный результат совпал с превью.
+        let rotated = rotate(source: normalized, rotationCW: rotation) ?? normalized
+
+        // 2) Кроп (если активирован): уже на ПОВЁРНУТОМ изображении.
+        guard isCropping else {
+            return rotated
+        }
+
+        return cropUsingInvertedTransform(
+            source: rotated,
+            imageViewSize: imageViewSize,
+            rotation: .zero,                 // поворот уже «вшит» в rotated
+            userZoom: userZoom,
+            imageOffset: imageOffset,
+            cropRectInView: cropRectInView
+        )
+    }
+
+    // MARK: - Поворот
+    /// Поворачивает bitmap «как в превью»:
+    /// rotationCW — SwiftUI угол (положительный = по часовой стрелке).
+    /// На входе ожидается изображение c imageOrientation == .up (см. normalizedOrientation()).
+    static func rotate(source original: UIImage, rotationCW: Angle) -> UIImage? {
+        guard let cg = original.cgImage else { return nil }
+
+        // Нормализуем до кратных 90 — у тебя кнопки по 90 градусов.
+        let degCW = ((Int(round(rotationCW.degrees)) % 360) + 360) % 360
+
+        // Если угол 0° — просто возвращаем нормализованное изображение
+        if degCW == 0 {
+            return original
+        }
+
+        // CoreGraphics использует «математический» знак (плюс = против часовой),
+        // поэтому для визуального поворота по часовой используем отрицательный угол.
+        let radians = -CGFloat(Double(degCW) * .pi / 180.0)
+
+        let w = CGFloat(cg.width)
+        let h = CGFloat(cg.height)
+        let outSize: CGSize =
+            (degCW == 90 || degCW == 270)
+            ? CGSize(width: h, height: w)
+            : CGSize(width: w, height: h)
+
+        let colorSpace = cg.colorSpace ?? CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(outSize.width),
+            height: Int(outSize.height),
+            bitsPerComponent: cg.bitsPerComponent,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+
+        // Ставим центр выходного полотна в (0,0), вращаем, затем рисуем исходник с переносом к центру.
+        ctx.translateBy(x: outSize.width / 2, y: outSize.height / 2)
+        ctx.rotate(by: radians)
+        ctx.translateBy(x: -w / 2, y: -h / 2)
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+
+        guard let outImage = ctx.makeImage() else { return nil }
+        return UIImage(cgImage: outImage, scale: original.scale, orientation: .up)
+    }
+
+    // MARK: - Кроп через инверсию трансформа
+    /// Строим transform из image-space → view-space:
+    ///   T = Translate(viewCenter) * Scale(S) * Rotate(radiansUI) * Translate(-imageCenter)
+    /// где S = min(viewW/rotW, viewH/rotH) * userZoom.
+    /// Затем берём T^-1 и прогоняем четыре угла cropRectInView в image-space.
+    private static func cropUsingInvertedTransform(
+        source original: UIImage,
+        imageViewSize: CGSize,
+        rotation: Angle,
+        userZoom: CGFloat,
+        imageOffset: CGPoint,
+        cropRectInView: CGRect
+    ) -> UIImage? {
+
+        guard let cg = original.cgImage else { return nil }
+
+        let w0 = CGFloat(cg.width)
+        let h0 = CGFloat(cg.height)
+        let imgCenter = CGPoint(x: w0 / 2, y: h0 / 2)
+        let viewCenter = CGPoint(x: imageViewSize.width / 2, y: imageViewSize.height / 2)
+
+        // Для rotated (мы уже передаём rotated и rotation = .zero),
+        // но оставляю универсальность: размер rotated-прямоугольника до масштабирования.
+        let degCW = ((Int(round(rotation.degrees)) % 360) + 360) % 360
+        let swapWH = (degCW == 90 || degCW == 270)
+        let rotW = swapWH ? h0 : w0
+        let rotH = swapWH ? w0 : h0
+
+        let baseScale = min(imageViewSize.width / max(rotW, 1),
+                            imageViewSize.height / max(rotH, 1))
+        let S = baseScale * max(userZoom, 0.0001)
+
+        // Визуально по часовой = отрицательный угол для CGAffineTransform.
+        let radiansUI = -CGFloat(rotation.radians)
+
+        // Image-space -> View-space
+        var T = CGAffineTransform.identity
+        T = T.translatedBy(x: viewCenter.x, y: viewCenter.y)
+        T = T.scaledBy(x: S, y: S)
+        T = T.rotated(by: radiansUI)
+        T = T.translatedBy(x: -imgCenter.x, y: -imgCenter.y)
+        // Сдвиг пальцем/панорамой, если когда-то будет добавлен:
+        T = T.translatedBy(x: imageOffset.x / max(1, 1), y: imageOffset.y / max(1, 1))
+
+        guard let Tinverse = T.invertedIfPossible else { return nil }
+
+        // Трансформируем углы cropRect из view-space в image-space
+        let p1 = CGPoint(x: cropRectInView.minX, y: cropRectInView.minY).applying(Tinverse)
+        let p2 = CGPoint(x: cropRectInView.maxX, y: cropRectInView.minY).applying(Tinverse)
+        let p3 = CGPoint(x: cropRectInView.maxX, y: cropRectInView.maxY).applying(Tinverse)
+        let p4 = CGPoint(x: cropRectInView.minX, y: cropRectInView.maxY).applying(Tinverse)
+
+        var crop = CGRect.enclosing(points: [p1, p2, p3, p4]).integral
+
+        // Клампим в границы битмапы
+        let bounds = CGRect(x: 0, y: 0, width: w0, height: h0)
+        crop = crop.intersection(bounds)
+        if crop.isEmpty || !crop.isFinite { return nil }
+        if crop.width <= 1 || crop.height <= 1 { return nil }
+
+        guard let clipped = cg.cropping(to: crop) else { return nil }
+        return UIImage(cgImage: clipped, scale: original.scale, orientation: .up)
+    }
+}
+
+// MARK: - Utils
+
+private extension CGRect {
+    static func enclosing(points: [CGPoint]) -> CGRect {
+        guard var r = points.first.map({ CGRect(origin: $0, size: .zero) }) else { return .null }
+        for p in points.dropFirst() {
+            r = r.union(CGRect(origin: p, size: .zero))
+        }
+        return r
+    }
+
+    var isFinite: Bool {
+        !(origin.x.isNaN || origin.y.isNaN || size.width.isNaN || size.height.isNaN ||
+          origin.x.isInfinite || origin.y.isInfinite || size.width.isInfinite || size.height.isInfinite)
+    }
+}
+
+private extension CGAffineTransform {
+    var isInvertible: Bool { abs(a * d - b * c) > .ulpOfOne }
+    var invertedIfPossible: CGAffineTransform? { isInvertible ? inverted() : nil }
+}
+
+// MARK: - UIImage orientation normalization
+
+private extension UIImage {
+    /// Приводит изображение к imageOrientation == .up,
+    /// при этом визуально картинка остаётся такой же, как её рисует UIKit/SwiftUI.
+    func normalizedOrientation() -> UIImage {
+        if imageOrientation == .up {
+            return self
+        }
+
+        UIGraphicsBeginImageContextWithOptions(size, false, scale)
+        defer { UIGraphicsEndImageContext() }
+
+        draw(in: CGRect(origin: .zero, size: size))
+        return UIGraphicsGetImageFromCurrentImageContext() ?? self
+    }
+}
+
+public enum ContentMode {
+    case fit
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: LoadingView.swift
+////////////////////////////////////////////////////////////
+
+// Presentation/Scenes/Search/LoadingView.swift
+//
+//  LoadingView.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 10/28/25.
+//
+
+import SwiftUI
+import Swinject
+
+struct LoadingView: View {
+    enum Mode { case name, face }
+
+    let mode: Mode
+    let previewImage: UIImage?
+
+    /// JPEG-данные для face-поиска.
+    /// Для name-поиска остаётся nil и логика не трогаем.
+    let imageJPEGData: Data?
+
+    @ObservedObject var vm: SearchViewModel
+    let onFinished: () -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.resolver) private var resolver
+
+    @State private var showErrorAlert = false
+    @State private var errorMessage: String?
+
+    // Paywall
+    @State private var showPaywall: Bool = false
+
+    // Подписка
+    @State private var isPremiumUser: Bool = true
+
+    // Фейковый счётчик совпадений (для face-режима)
+    @State private var matchesCount: Int = 1
+
+    // Контроль времени фейк-лоадера
+    @State private var minDelayPassed: Bool = false
+    @State private var searchCompleted: Bool = false
+    @State private var didFinishFlow: Bool = false
+
+    // Старт реального поиска (runImageSearch) только один раз
+    @State private var hasStartedSearch: Bool = false
+
+    // Таски, чтобы можно было отменять
+    @State private var fakeCounterTask: Task<Void, Never>?
+    @State private var delayTask: Task<Void, Never>?
+
+    // MARK: - Init (явный, чтобы не ломать старые вызовы)
+
+    init(
+        mode: Mode,
+        previewImage: UIImage?,
+        imageJPEGData: Data? = nil,
+        vm: SearchViewModel,
+        onFinished: @escaping () -> Void
+    ) {
+        self.mode = mode
+        self.previewImage = previewImage
+        self.imageJPEGData = imageJPEGData
+        self.vm = vm
+        self.onFinished = onFinished
+    }
+
+    // MARK: - Body
+
+    var body: some View {
+        ZStack {
+            Tokens.Color.backgroundMain.ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                // Header
+                HStack {
+                    BackButton(size: 44.scale) { dismiss() }
+                        .disabled(vm.isLoading)
+                        .opacity(vm.isLoading ? 0.5 : 1)
+                    Spacer()
+                    Text("Search by photo")
+                        .font(Tokens.Font.bodyMedium18)
+                        .foregroundStyle(Tokens.Color.textPrimary)
+                    Spacer()
+                    Color.clear.frame(width: 44.scale, height: 44.scale)
+                }
+                .padding(.horizontal, 16.scale)
+                .padding(.top, 0.scale)
+
+                Spacer(minLength: 0)
+
+                if mode == .face, let ui = previewImage {
+                    VStack(spacing: 16.scale) {
+                        Image(uiImage: ui)
+                            .resizable()
+                            .scaledToFit()
+                            .clipShape(RoundedRectangle(cornerRadius: 16.scale, style: .continuous))
+                            .shadow(color: Color.black.opacity(0.15), radius: 10)
+                            .frame(maxWidth: .infinity)
+                            .padding(16.scale)
+
+                        Text("Photo analysis")
+                            .font(Tokens.Font.medium20)
+                            .foregroundStyle(Tokens.Color.textPrimary)
+
+                        VStack(spacing: 12.scale) {
+                            // Matches found in databases 24
+                            HStack(spacing: 4.scale) {
+                                Text("Matches found in databases")
+                                    .font(Tokens.Font.captionRegular)
+                                    .foregroundStyle(Tokens.Color.textSecondary)
+
+                                Text("\(matchesCount)")
+                                    .font(Tokens.Font.captionRegular)
+                                    .foregroundStyle(Tokens.Color.accent)
+                            }
+
+                            ThreeDotsLoader()
+                        }
+                        .padding(.top, 8.scale)
+                        .padding(.bottom, 52.scale)
+                    }
+                } else {
+                    VStack(spacing: 16.scale) {
+                        ThreeDotsLoader()
+                        Text("Searching...")
+                            .font(Tokens.Font.body)
+                            .foregroundStyle(Tokens.Color.textPrimary)
+                    }
+                }
+
+                Spacer(minLength: 0)
+            }
+        }
+        .navigationBarBackButtonHidden(true)
+        // ⬇️ пока этот экран в стеке — прячем системный таббар
+        .toolbar(.hidden, for: .tabBar)
+
+        // Paywall после фейк-лоадера для не-премиум
+        .fullScreenCover(isPresented: $showPaywall, onDismiss: {
+            handlePaywallDismiss()
+        }) {
+            let payVM = resolver.resolve(PaywallViewModel.self)!
+            PaywallView(vm: payVM)
+                .ignoresSafeArea()
+        }
+
+        // MARK: - Жизненный цикл
+        .onAppear {
+            setupFlow()
+        }
+        .onDisappear {
+            cancelTasks()
+        }
+
+        // MARK: - Реакция на завершение загрузки
+        .onChange(of: vm.isLoading) { _, isNowLoading in
+            guard !didFinishFlow else { return }
+
+            if isNowLoading == false {
+                if let msg = vm.errorText, !msg.isEmpty {
+                    errorMessage = msg
+                    showErrorAlert = true
+                    cancelTasks()
+                } else {
+                    // Успешный ответ сервера
+                    searchCompleted = true
+                    completeIfReady()
+                }
+            }
+        }
+        .onChange(of: vm.errorText) { _, msg in
+            guard let msg, !msg.isEmpty else { return }
+            errorMessage = msg
+            showErrorAlert = true
+            cancelTasks()
+        }
+        .alert("Search failed", isPresented: $showErrorAlert) {
+            Button("OK") {
+                vm.resetResults()
+                dismiss()
+            }
+        } message: {
+            Text(errorMessage ?? "Internal Server Error")
+        }
+    }
+}
+
+// MARK: - Вспомогательные методы
+private extension LoadingView {
+    func setupFlow() {
+        // Определяем, премиум ли пользователь на старте
+        let isPremium = resolver.resolve(PremiumStore.self)?.isPremium ?? false
+        isPremiumUser = isPremium
+
+        cancelTasks()
+        didFinishFlow = false
+        minDelayPassed = false
+        searchCompleted = false
+        hasStartedSearch = false
+
+        let totalDuration: TimeInterval = isPremium ? 3.0 : 7.0
+
+        // Фейковый счётчик совпадений (только для face-режима)
+        if mode == .face {
+            fakeCounterTask = Task { @MainActor in
+                let steps = [1, 3, 8, 11]
+                matchesCount = steps.first ?? 1
+                if steps.count > 1 {
+                    let stepDuration = totalDuration / Double(steps.count - 1)
+                    for value in steps.dropFirst() {
+                        try? await Task.sleep(for: .seconds(stepDuration))
+                        if Task.isCancelled { return }
+                        matchesCount = value
+                    }
+                }
+            }
+        }
+
+        // Главная задержка
+        delayTask = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(totalDuration))
+            if Task.isCancelled { return }
+
+            // 3 или 7 секунд прошли
+            minDelayPassed = true
+
+            if isPremium {
+                // Премиум — после задержки ждём готовности результатов и идём дальше
+                completeIfReady()
+            } else {
+                // Не премиум — после 7 секунд показываем paywall
+                showPaywall = true
+            }
+        }
+
+        // Если пользователь уже премиум — сразу стартуем реальный поиск
+        if isPremium {
+            startSearchIfNeeded()
+        }
+    }
+
+    /// Стартуем реальный image-поиск (runImageSearch) только один раз
+    /// и только для face-режима.
+    func startSearchIfNeeded() {
+        guard !hasStartedSearch else { return }
+        guard mode == .face, let jpeg = imageJPEGData else { return }
+
+        hasStartedSearch = true
+
+        vm.resetResults()
+        vm.runImageSearch(jpegData: jpeg)
+    }
+
+    /// Вызывается когда:
+    /// - закончился запрос (vm.isLoading == false и без ошибки)
+    /// - прошло минимум 3/7 секунд
+    /// - пользователь премиум (изначально или после покупки на Paywall)
+    func completeIfReady() {
+        guard isPremiumUser else { return }
+        guard !didFinishFlow else { return }
+        guard minDelayPassed && searchCompleted else { return }
+
+        didFinishFlow = true
+        cancelTasks()
+
+        // Небольшая плавная задержка перед переходом
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            onFinished()
+        }
+    }
+
+    /// Обработка закрытия Paywall:
+    /// - если подписку не купили — возвращаемся к FaceSearchView
+    /// - если купили — переключаемся на премиум-ветку и идём к результатам
+    ///   (и только ТЕПЕРЬ делаем реальный запрос на бэк)
+    func handlePaywallDismiss() {
+        let premiumNow = resolver.resolve(PremiumStore.self)?.isPremium ?? false
+
+        if premiumNow {
+            // Пользователь оформил подписку на Paywall
+            isPremiumUser = true
+
+            // 7 секунд уже прошли, гарантированно:
+            minDelayPassed = true
+
+            // Только теперь напрягаем сервер
+            startSearchIfNeeded()
+
+            // Если поиск уже успел закончиться — сразу пойдём дальше,
+            // если нет — дождёмся vm.isLoading == false
+            completeIfReady()
+        } else {
+            // Подписку не купили — возвращаемся назад к FaceSearchView
+            didFinishFlow = true
+            cancelTasks()
+            dismiss()
+        }
+    }
+
+    func cancelTasks() {
+        fakeCounterTask?.cancel()
+        delayTask?.cancel()
+        fakeCounterTask = nil
+        delayTask = nil
+    }
+}
+
+// MARK: - Три точки загрузки (как на сплэше)
+
+// ⬇️ УБРАЛ private, чтобы использовать и в Cheater
+struct ThreeDotsLoader: View {
+    @State private var activeIndex: Int = 0
+
+    private let big: CGFloat = 16
+    private let mid: CGFloat = 8
+    private let small: CGFloat = 4
+    private let count: Int = 3
+
+    // шаг анимации
+    private let timer = Timer.publish(every: 0.35, on: .main, in: .common).autoconnect()
+
+    var body: some View {
+        HStack(spacing: 8.scale) {
+            ForEach(0..<count, id: \.self) { idx in
+                // расстояние точки от активной (0 — большая, 1 — средняя, 2 — маленькая)
+                let dist = (idx - activeIndex + count) % count
+
+                let baseSize: CGFloat =
+                    dist == 0 ? big :
+                    dist == 1 ? mid :
+                    small
+
+                Circle()
+                    .fill(
+                        dist == 0
+                        ? Tokens.Color.accent
+                        : Tokens.Color.borderNeutral.opacity(0.35)
+                    )
+                    .frame(
+                        width: baseSize.scale,
+                        height: baseSize.scale
+                    )
+                    .animation(.easeOut(duration: 0.35), value: activeIndex)
+            }
+        }
+        .onReceive(timer) { _ in
+            activeIndex = (activeIndex + 1) % count
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: SearchResultsView.swift
+////////////////////////////////////////////////////////////
+
+// Presentation/Scenes/Search/SearchResultsView.swift
+// CheaterBuster
+//
+// Created by Niiaz Khasanov on 10/28/25.
+//
+
+import SwiftUI
+import UIKit
+import WebKit
+
+// MARK: - Web sheet item
+
+private struct SearchResultWebItem: Identifiable, Equatable {
+    let id = UUID()
+    let url: URL
+}
+
+struct SearchResultsView: View {
+    @ObservedObject var vm: SearchViewModel
+    @Binding var path: [SearchScreen.Route]
+    
+    @State private var didSignalRateUs = false
+
+    // Вместо Bool + URL — один item для .sheet(item:)
+    @State private var activeWebItem: SearchResultWebItem?
+    
+    // Жёсткие размеры и отступы
+    private let itemSide: CGFloat = 167.5.scale
+    private let gridSpacing: CGFloat = Tokens.Spacing.x16
+    private let gridPadding: CGFloat = Tokens.Spacing.x16
+    private let corner: CGFloat = Tokens.Radius.medium
+    
+    private var columns: [GridItem] {
+        [
+            GridItem(.fixed(itemSide), spacing: gridSpacing, alignment: .top),
+            GridItem(.fixed(itemSide), spacing: gridSpacing, alignment: .top)
+        ]
+    }
+    
+    private var results: [ImageHit] { vm.results }
+    
+    var body: some View {
+        ZStack {
+            VStack(spacing: 0) {
+                // Header
+                HStack {
+                    BackButton(size: 44.scale) { _ = path.popLast() }
+                    
+                    Spacer()
+                    
+                    Text("Face results")
+                        .font(Tokens.Font.bodyMedium18)
+                        .foregroundStyle(Tokens.Color.textPrimary)
+                    
+                    Spacer()
+                    Color.clear.frame(width: 44.scale, height: 44.scale)
+                }
+                .padding(.horizontal, gridPadding)
+                .padding(.top, 0.scale)
+                .padding(.bottom, Tokens.Spacing.x8)
+                
+                ScrollView {
+                    if results.isEmpty {
+                        ContentUnavailableView(
+                            "No results found",
+                            systemImage: "magnifyingglass.circle",
+                            description: Text("No matches found. Please try a different photo.")
+                        )
+                        .padding(.top, Tokens.Spacing.x24)
+                    } else {
+                        LazyVGrid(columns: columns, spacing: gridSpacing) {
+                            ForEach(results) { hit in
+                                SquareResultCell(
+                                    hit: hit,
+                                    side: itemSide,
+                                    corner: corner
+                                )
+                                .onTapGesture {
+                                    handleTap(on: hit)
+                                }
+                                .onLongPressGesture {
+                                    handleTap(on: hit)
+                                }
+                            }
+                        }
+                        .padding(.horizontal, gridPadding)
+                        .padding(.vertical, Tokens.Spacing.x24)
+                        .animation(.easeInOut(duration: 0.25), value: results.count)
+                    }
+                }
+                .background(Tokens.Color.backgroundMain.ignoresSafeArea())
+            }
+        }
+        .navigationBarBackButtonHidden(true)
+        .onAppear {
+            guard !vm.results.isEmpty, !didSignalRateUs else { return }
+            didSignalRateUs = true
+            Task { await RateUsScheduler.shared.request(.searchResults) }
+        }
+        // MARK: - Web sheet через item
+        .sheet(item: $activeWebItem) { item in
+            SearchResultWebSheet(
+                url: item.url,
+                onClose: { activeWebItem = nil }
+            )
+            .ignoresSafeArea()
+        }
+    }
+    
+    // MARK: - Actions
+    
+    private func handleTap(on hit: ImageHit) {
+        // Если нет ссылки — ничего не делаем
+        guard let url = hit.linkURL else { return }
+        
+        // 🔹 ANALYTICS: попытка открыть результат в WebView
+        Analytics.shared.track("search_results_open_webview")
+        
+        // Открываем ссылку в WebView внутри sheet
+        activeWebItem = SearchResultWebItem(url: url)
+    }
+}
+
+// MARK: - Квадратная карточка результата
+
+private struct SquareResultCell: View {
+    let hit: ImageHit
+    let side: CGFloat
+    let corner: CGFloat
+    
+    var body: some View {
+        VStack(spacing: Tokens.Spacing.x8) {
+            AsyncThumb(url: hit.thumbnailURL)
+                .frame(width: side, height: side)
+                .clipShape(RoundedRectangle(cornerRadius: corner, style: .continuous))
+            
+            Text(hit.title)
+                .font(Tokens.Font.caption)
+                .foregroundStyle(Tokens.Color.textPrimary)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .frame(width: side)
+    }
+}
+
+// MARK: - AsyncThumb — безопасная загрузка превью
+
+private struct AsyncThumb: View {
+    let url: URL?
+    
+    var body: some View {
+        AsyncImage(url: url, transaction: .init(animation: .default)) { phase in
+            switch phase {
+            case .empty:
+                Placeholder()
+            case .success(let image):
+                image
+                    .resizable()
+                    .scaledToFill()
+                    .clipped()
+            case .failure:
+                Placeholder()
+            @unknown default:
+                Placeholder()
+            }
+        }
+    }
+}
+
+// MARK: - Placeholder
+
+private struct Placeholder: View {
+    var body: some View {
+        ZStack {
+            Tokens.Color.surfaceCard
+            Image(systemName: "photo")
+                .font(.system(size: 24.scale, weight: .regular))
+                .foregroundStyle(Tokens.Color.textSecondary.opacity(0.5))
+        }
+        .aspectRatio(1, contentMode: .fill)
+    }
+}
+
+// MARK: - Web sheet контейнер с хедером
+
+private struct SearchResultWebSheet: View {
+    let url: URL
+    let onClose: () -> Void
+    
+    @State private var isLoading: Bool = true
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            header
+            Divider()
+                .background(Tokens.Color.borderNeutral.opacity(0.4))
+            
+            ZStack {
+                SearchResultWebView(url: url, isLoading: $isLoading)
+                    .id(url) // 🔁 пересоздаём WKWebView при смене URL
+                    .edgesIgnoringSafeArea(.bottom)
+                
+                if isLoading {
+                    ZStack {
+                        Tokens.Color.backgroundMain
+                            .opacity(0.3)
+                            .ignoresSafeArea()
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .scaleEffect(1.2)
+                    }
+                }
+            }
+        }
+        .background(Tokens.Color.backgroundMain)
+    }
+    
+    private var header: some View {
+        HStack(spacing: 12.scale) {
+            Button(action: onClose) {
+                Text("Close")
+                    .font(Tokens.Font.bodyMedium16)
+                    .foregroundStyle(Tokens.Color.textPrimary)
+            }
+            
+            // URL по центру, одна строка, с многоточием
+            Text(url.absoluteString)
+                .font(Tokens.Font.medium12)
+                .foregroundStyle(Tokens.Color.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 16.scale)
+        .padding(.vertical, 12.scale)
+        .background(Color.white)
+        .shadow(color: Color.black.opacity(0.08), radius: 6.scale, y: 2.scale)
+    }
+}
+
+// MARK: - Чистый WKWebView с делегатом и индикатором
+
+private struct SearchResultWebView: UIViewRepresentable {
+    let url: URL
+    @Binding var isLoading: Bool
+    
+    // MARK: - Coordinator
+    
+    final class Coordinator: NSObject, WKNavigationDelegate {
+        var parent: SearchResultWebView
+        
+        init(parent: SearchResultWebView) {
+            self.parent = parent
+        }
+        
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            parent.isLoading = true
+            print("🌍 [WebView] didStartProvisionalNavigation: \(webView.url?.absoluteString ?? "nil")")
+        }
+        
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            parent.isLoading = false
+            print("✅ [WebView] didFinish: \(webView.url?.absoluteString ?? "nil")")
+        }
+        
+        func webView(_ webView: WKWebView,
+                     didFailProvisionalNavigation navigation: WKNavigation!,
+                     withError error: Error) {
+            parent.isLoading = false
+            print("❌ [WebView] didFailProvisionalNavigation: \(error.localizedDescription)")
+        }
+        
+        func webView(_ webView: WKWebView,
+                     didFail navigation: WKNavigation!,
+                     withError error: Error) {
+            parent.isLoading = false
+            print("❌ [WebView] didFail: \(error.localizedDescription)")
+        }
+        
+        // Если процесс WebKit упал — перезагружаем, чтобы не висеть на белом экране
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            print("⚠️ [WebView] webViewWebContentProcessDidTerminate, reloading…")
+            parent.isLoading = true
+            webView.reload()
+        }
+    }
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(parent: self)
+    }
+    
+    // MARK: - UIViewRepresentable
+    
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        let web = WKWebView(frame: .zero, configuration: config)
+        
+        web.navigationDelegate = context.coordinator
+        web.scrollView.bounces = true
+        web.allowsBackForwardNavigationGestures = true
+        
+        // Чуть уменьшаем шанс "вечного белого" из-за артефактов
+        web.isOpaque = false
+        web.backgroundColor = .systemBackground
+        
+        let request = URLRequest(
+            url: url,
+            cachePolicy: .reloadIgnoringLocalCacheData,
+            timeoutInterval: 30
+        )
+        web.load(request)
+        
+        return web
+    }
+    
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        uiView.navigationDelegate = context.coordinator
+        
+        // Если URL изменился — перезагрузить
+        if uiView.url != url {
+            let request = URLRequest(
+                url: url,
+                cachePolicy: .reloadIgnoringLocalCacheData,
+                timeoutInterval: 30
+            )
+            uiView.load(request)
+        }
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: SearchScreen.swift
+////////////////////////////////////////////////////////////
+
+// Presentation/Search/SearchScreen.swift
+
+import SwiftUI
+import Swinject
+import PhotosUI
+import UniformTypeIdentifiers
+import UIKit
+
+// MARK: - Environment key для передачи выбранного фото в FaceSearchView
+
+private struct SelectedFaceImageKey: EnvironmentKey {
+    static let defaultValue: UIImage? = nil
+}
+
+extension EnvironmentValues {
+    var selectedFaceImage: UIImage? {
+        get { self[SelectedFaceImageKey.self] }
+        set { self[SelectedFaceImageKey.self] = newValue }
+    }
+}
+
+struct SearchScreen: View {
+    // MARK: - Навигация через path
+    enum Route: Hashable {
+        case face
+        case results
+    }
+
+    @State private var path: [Route] = []
+
+    @StateObject private var vm: SearchViewModel
+
+    /// Коллбек закрытия всего Search-флоу (дизмисс с Home)
+    private let onClose: () -> Void
+
+    // MARK: - Source picker (как в CheaterView)
+
+    @State private var showSourceSheet = false
+
+    // PhotosPicker
+    @State private var photoItem: PhotosPickerItem?
+    @State private var showPhotoPicker = false
+
+    // Document picker (только картинки)
+    @State private var showFilePicker = false
+
+    // Выбранная картинка (из галереи или файлов)
+    @State private var selectedImage: UIImage? = nil
+
+    // MARK: - Init
+
+    init(vm: SearchViewModel, onClose: @escaping () -> Void = {}) {
+        _vm = StateObject(wrappedValue: vm)
+        self.onClose = onClose
+    }
+
+    var body: some View {
+        NavigationStack(path: $path) {
+
+            // 👉 Фикс «прыжка»: берём системный safeArea bottom (home-indicator),
+            // а таббар будем игнорировать.
+            let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+            let window = windowScene?.windows.first(where: { $0.isKeyWindow })
+            let safeBottomInset = window?.safeAreaInsets.bottom ?? 0
+
+            VStack(spacing: 24.scale) {
+
+                // ==== КАСТОМНЫЙ HEADER ====
+                header
+
+                // ==== Карточка Upload photo ====
+                Button {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        showSourceSheet = true
+                    }
+                } label: {
+                    UploadPhotoCardView()
+                }
+                .buttonStyle(OpacityTapButtonStyle())
+                .frame(maxWidth: .infinity, alignment: .center)
+
+                Spacer(minLength: 0)
+
+                // ==== Кнопка Start search ====
+                startSearchButton
+            }
+            .padding(.horizontal, Tokens.Spacing.x16)
+            .padding(.top, Tokens.Spacing.x8)
+            // нижний отступ считаем сами: home-indicator + 24pt
+            .padding(.bottom, safeBottomInset + 24.scale)
+            .background(Tokens.Color.backgroundMain.ignoresSafeArea())
+            // контент не реагирует на изменение safeArea из-за таббара
+            .ignoresSafeArea(edges: .bottom)
+
+            // MARK: - Назначения
+            .navigationDestination(for: Route.self) { route in
+                switch route {
+                case .face:
+                    FaceSearchView(vm: vm, onFinished: { path.append(.results) })
+                        .navigationBarBackButtonHidden(true)
+                        .edgeSwipeToPop(isEnabled: true) { path.removeLast() }
+                        // ← сюда пробрасываем выбранную картинку
+                        .environment(\.selectedFaceImage, selectedImage)
+
+                case .results:
+                    SearchResultsView(vm: vm, path: $path)
+                        .navigationBarBackButtonHidden(true)
+                        .edgeSwipeToPop(isEnabled: true) { path.removeLast() }
+                }
+            }
+
+            // ============================
+            //           PICKERS
+            // ============================
+
+            // Фото из галереи
+            .photosPicker(
+                isPresented: $showPhotoPicker,
+                selection: $photoItem,
+                matching: .images
+            )
+            .onChange(of: photoItem) { _, item in
+                guard let item else { return }
+
+                Task {
+                    if let data = try? await item.loadTransferable(type: Data.self),
+                       let img = UIImage(data: data) {
+                        await MainActor.run {
+                            selectedImage = img
+                            navigateToFaceIfNeeded()
+                        }
+                    }
+                    await MainActor.run {
+                        photoItem = nil
+                    }
+                }
+            }
+
+            // Файл, но только картинка
+            .fileImporter(
+                isPresented: $showFilePicker,
+                allowedContentTypes: [.image],      // ← строго только картинки
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    guard let url = urls.first else { return }
+                    let secured = url.startAccessingSecurityScopedResource()
+                    defer { if secured { url.stopAccessingSecurityScopedResource() } }
+
+                    do {
+                        let data = try Data(contentsOf: url)
+                        if let img = UIImage(data: data) {
+                            selectedImage = img
+                            navigateToFaceIfNeeded()
+                        }
+                    } catch {
+                        print("Failed to read image file: \(error.localizedDescription)")
+                    }
+
+                case .failure(let error):
+                    print("File import failed: \(error.localizedDescription)")
+                }
+            }
+
+            // === Overlay выбора источника (Select a photo or file) ===
+            .overlay(alignment: .bottom) {
+                if showSourceSheet {
+                    SourcePickerOverlay(
+                        onFiles: {
+                            showSourceSheet = false
+                            showFilePicker  = true
+                        },
+                        onLibrary: {
+                            showSourceSheet = false
+                            showPhotoPicker = true
+                        },
+                        onDismiss: {
+                            showSourceSheet = false
+                        }
+                    )
+                    .zIndex(1000)
+                    .ignoresSafeArea()
+                }
+            }
+        }
+        // Полностью прячем системный navbar
+        .navigationBarBackButtonHidden(true)
+        .toolbar(.hidden, for: .navigationBar)
+
+        // MARK: - Управление таббаром (оставляем, не мешает)
+        .onChange(of: path) { _, newPath in
+            let shouldHideTabBar = !newPath.isEmpty
+            TabBarTransparencyAnimator.setTransparent(shouldHideTabBar)
+        }
+        .onAppear {
+            TabBarTransparencyAnimator.setTransparent(false)
+        }
+        .onDisappear {
+            TabBarTransparencyAnimator.setTransparent(false)
+        }
+    }
+
+    // MARK: - Хелпер навигации
+
+    private func navigateToFaceIfNeeded() {
+        if !path.contains(.face) {
+            path.append(.face)
+        }
+    }
+
+    // MARK: - Кастомный хедер
+
+    private var header: some View {
+        ZStack {
+            // Центрированный заголовок
+            Text("Search by photo")
+                .font(Tokens.Font.medium18)
+                .foregroundStyle(Tokens.Color.textPrimary)
+
+            // Левая кнопка Back
+            HStack {
+                Button {
+                    onClose()
+                } label: {
+                    Image("backButton")
+                        .resizable()
+                        .renderingMode(.template)
+                        .scaledToFit()
+                        .frame(width: 24.scale, height: 24.scale)
+                }
+                .foregroundStyle(Tokens.Color.textPrimary)
+
+                Spacer()
+            }
+        }
+        .padding(.top, 4.scale)
+    }
+
+    // MARK: - Кнопка Start search
+
+    private var startSearchButton: some View {
+        let hasImage = (selectedImage != nil)
+
+        return Button {
+            if hasImage {
+                navigateToFaceIfNeeded()
+            } else {
+                // Если фото ещё нет — открываем выбор источника
+                withAnimation(.easeInOut(duration: 0.25)) {
+                    showSourceSheet = true
+                }
+            }
+        } label: {
+            HStack(spacing: 8.scale) {
+                Text("Start search")
+                    .font(Tokens.Font.bodySemibold16)
+                    .tracking(-0.16)
+
+                Spacer()
+
+                Image("nextArrow")
+                    .resizable()
+                    .renderingMode(.template)
+                    .scaledToFit()
+                    .frame(width: 20.scale, height: 20.scale)
+            }
+            .foregroundColor(.white)
+            .padding(.leading, 20.scale)
+            .padding(.trailing, 24.scale)
+            .frame(width: 343.scale, height: 51.scale, alignment: .center)
+            .background(
+                Tokens.Color.accent.opacity(hasImage ? 1.0 : 0.5) // активная / неактивная
+            )
+            .clipShape(
+                RoundedRectangle(
+                    cornerRadius: Tokens.Radius.pill,
+                    style: .continuous
+                )
+            )
+        }
+        .buttonStyle(OpacityTapButtonStyle())
+        .frame(maxWidth: .infinity, alignment: .center)
+    }
+}
+
+// MARK: - Карточка Upload photo
+
+private struct UploadPhotoCardView: View {
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 24.scale, style: .continuous)
+                .fill(Tokens.Color.accent.opacity(0.08)) // Accent 8%
+
+            VStack(spacing: 12.scale) {
+                Image("search.imageIcom")
+                    .resizable()
+                    .renderingMode(.template)
+                    .scaledToFit()
+                    .frame(width: 32.scale, height: 32.scale)
+                    .foregroundStyle(Tokens.Color.accent)
+
+                Text("Upload a photo")
+                    .font(Tokens.Font.bodySemibold16)
+                    .foregroundStyle(Tokens.Color.accent)
+            }
+        }
+        .frame(width: 343.scale, height: 200.scale)
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: SearchViewModel.swift
+////////////////////////////////////////////////////////////
+
+//
+//  SearchViewModel.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 10/28/25.
+//
+
+import Foundation
+import Combine
+import UIKit
+
+
+final class SearchViewModel: ObservableObject {
+
+    // MARK: - Output
+    @Published var results: [ImageHit] = [] 
+    @Published private(set) var isLoading: Bool = false            // мелкие индикаторы (в кнопках)
+    @Published private(set) var isBlockingLoading: Bool = false     // full-screen загрузка
+    @Published private(set) var errorText: String?
+
+    // MARK: - Deps
+    private let search: SearchService
+    private let history: HistoryStore
+    private let settings: SettingsStore?
+
+    private var bag = Set<AnyCancellable>()
+
+    // MARK: - Init
+    init(search: SearchService,
+         history: HistoryStore,
+         settings: SettingsStore? = nil)
+    {
+        self.search = search
+        self.history = history
+        self.settings = settings
+        // NOTE: удалён дебаунс по query (name-search)
+    }
+
+    // MARK: - Запуск по кнопке «Analyze» (по фото)
+
+    func runImageSearch(jpegData: Data) {
+        // 🔻 отменяем любой предыдущий пайплайн
+        bag.forEach { $0.cancel() }
+        bag.removeAll()
+
+        isLoading = true
+        isBlockingLoading = true
+        errorText = nil
+
+        search.searchByImage(jpegData)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] completion in
+                guard let self else { return }
+                self.isLoading = false
+                self.isBlockingLoading = false
+                if case .failure(let err) = completion {
+                    self.errorText = err.localizedDescription
+                    self.results = []
+                }
+            } receiveValue: { [weak self] hits in
+                guard let self else { return }
+                self.results = hits
+
+                let thumbData = (UIImage(data: jpegData)?
+                    .jpegData(compressionQuality: 0.5)) ?? jpegData
+
+                let rec = HistoryRecord(
+                    kind: .face,
+                    query: nil,
+                    imageJPEG: thumbData,
+                    titlePreview: hits.first?.title,
+                    sourcePreview: hits.first?.source
+                )
+                self.history.add(rec)
+            }
+            .store(in: &bag)
+    }
+
+
+    // MARK: - Прочее (если нужно использовать)
+    func resetResults() {
+        results = []
+        errorText = nil
+    }
+}
+
+
+////////////////////////////////////////////////////////////
+// FILE: Tmp/CropOverlayView.swift
+////////////////////////////////////////////////////////////
+
+//
+//  CropOverlayView.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/2/25.
+//
+
+
+//
+//  CropOverlayView.swift
+//  CheaterBuster
+//
+//  Created by Niiaz Khasanov on 11/02/25.
+//
+
+import SwiftUI
+
+struct CropOverlayView: View {
+    let cropRect: CGRect
+    let lineWidth: CGFloat
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                // Полупрозрачная маска с "дыркой"
+                Path { path in
+                    path.addRect(CGRect(origin: .zero, size: geo.size))
+                    path.addRect(cropRect)
+                }
+                .fill(Color.black.opacity(0.5), style: FillStyle(eoFill: true))
+
+                // Рамка
+                RoundedRectangle(cornerRadius: 0)
+                    .stroke(Tokens.Color.accent, lineWidth: lineWidth)
+                    .frame(width: cropRect.width, height: cropRect.height)
+                    .position(x: cropRect.midX, y: cropRect.midY)
+            }
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+

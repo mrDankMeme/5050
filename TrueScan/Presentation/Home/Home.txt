@@ -1,0 +1,232 @@
+////////////////////////////////////////////////////////////
+// FILE: HomeScreen.swift
+////////////////////////////////////////////////////////////
+
+// Presentation/Home/HomeScreen.swift
+
+import SwiftUI
+import Swinject
+
+struct HomeScreen: View {
+    @Environment(\.resolver) private var resolver
+
+    private enum ActiveFlow: Equatable {
+        case search
+        case cheater
+    }
+
+    @State private var activeFlow: ActiveFlow? = nil
+
+    var body: some View {
+        ZStack {
+            // Задний экран (Home), с лёгким parallax
+            mainContent
+                .offset(x: activeFlow != nil ? -40.scale : 0)
+                .animation(
+                    .spring(response: 0.35, dampingFraction: 0.9),
+                    value: activeFlow
+                )
+
+            // Оверлей-флоу (имитация push)
+            if let flow = activeFlow {
+                flowContainer(for: flow)
+                    .transition(.move(edge: .trailing))
+                    .shadow(
+                        color: Color.black.opacity(0.03),
+                        radius: 2,
+                        x: -1,
+                        y: 0
+                    )
+                    .zIndex(10)
+            }
+        }
+        .animation(.spring(response: 0.35, dampingFraction: 0.9), value: activeFlow)
+        .toolbar(activeFlow != nil ? .hidden : .visible, for: .tabBar)
+    }
+
+    // MARK: - Основной экран с двумя карточками
+
+    private var mainContent: some View {
+        VStack(alignment: .leading, spacing: 24.scale) {
+
+            Text("Cheater Buster")
+                .font(Tokens.Font.h2)
+                .foregroundStyle(Tokens.Color.textPrimary)
+                .padding(.top, Tokens.Spacing.x24)
+                .padding(.bottom, 12.scale)
+
+            // Карточки
+            VStack(spacing: 24.scale) {
+
+                // 1) Find profiles by face
+                Button {
+                    withAnimation {
+                        activeFlow = .search
+                    }
+                } label: {
+                    HomeFeatureCardView(
+                        iconName: "home.search",
+                        title: "Find profiles by face",
+                        subtitle: "Find out if this person is really who they say they are.",
+                        buttonTitle: "Search by photo"
+                    )
+                }
+                .buttonStyle(OpacityTapButtonStyle())
+
+                // 2) Detect scam in messages
+                Button {
+                    withAnimation {
+                        activeFlow = .cheater
+                    }
+                } label: {
+                    HomeFeatureCardView(
+                        iconName: "home.warning",
+                        title: "Detect scam in messages",
+                        subtitle: "AI uncovers hidden red flags, manipulation, or risky behavior.",
+                        buttonTitle: "Check messages"
+                    )
+                }
+                .buttonStyle(OpacityTapButtonStyle())
+            }
+            .frame(maxWidth: .infinity, alignment: .center)
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, Tokens.Spacing.x16)
+        .background(Tokens.Color.backgroundMain.ignoresSafeArea())
+    }
+
+    // MARK: - Контейнер, который "эмулирует" Navigation push
+
+    @ViewBuilder
+    private func flowContainer(for flow: ActiveFlow) -> some View {
+        ZStack(alignment: .topLeading) {
+            Tokens.Color.backgroundMain
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                switch flow {
+                case .search:
+                    SearchScreen(
+                        vm: resolver.resolve(SearchViewModel.self)!,
+                        onClose: {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+                                activeFlow = nil
+                            }
+                        }
+                    )
+
+                case .cheater:
+                    CheaterView(
+                        vm: resolver.resolve(CheaterViewModel.self)!,
+                        onClose: {
+                            withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+                                activeFlow = nil
+                            }
+                        }
+                    )
+                }
+            }
+        }
+        .edgeSwipeToPop(isEnabled: true) {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.9)) {
+                activeFlow = nil
+            }
+        }
+    }
+
+    private func title(for flow: ActiveFlow) -> String {
+        switch flow {
+        case .search:  return "Search"
+        case .cheater: return "Cheater"
+        }
+    }
+}
+
+// MARK: - Отдельная вьюха карточки
+
+private struct HomeFeatureCardView: View {
+    let iconName: String
+    let title: String
+    let subtitle: String
+    let buttonTitle: String
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 32.scale, style: .continuous)
+                .fill(Tokens.Color.surfaceCard)
+                .apply(Tokens.Shadow.card)
+
+            VStack(spacing: 0) {
+
+                // 24pt сверху → иконка
+                Spacer().frame(height: 24.scale)
+
+                // Иконка 48x48
+                Image(iconName)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 48.scale, height: 48.scale)
+
+                // 16pt иконка → title
+                Spacer().frame(height: 16.scale)
+
+                // Заголовок
+                Text(title)
+                    .font(Tokens.Font.medium18)
+                    .tracking(-0.18) // ~ -1% от 18
+                    .foregroundStyle(Tokens.Color.textPrimary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16.scale)
+
+                // 8pt title → subtitle
+                Spacer().frame(height: 8.scale)
+
+                // Подзаголовок
+                Text(subtitle)
+                    .font(Tokens.Font.regular16)
+                    .foregroundStyle(Tokens.Color.textSecondary)
+                    .multilineTextAlignment(.center)
+                    .tracking(-0.16) // ~ -1% от 16
+                    .lineSpacing((1 * 16.scale) - 16.scale) // 140% line-height
+                    .padding(.horizontal, 16.scale)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                // 24pt subtitle → button
+                Spacer().frame(height: 24.scale)
+
+                // Кнопка
+                HStack(spacing: 8.scale) {
+                    Text(buttonTitle)
+                        .font(Tokens.Font.bodySemibold16)
+                        .tracking(-0.16)
+                    Spacer()
+                    Image("nextArrow")
+                           .resizable()
+                           .renderingMode(.template)
+                           .scaledToFit()
+                           .frame(width: 20.scale, height: 20.scale)
+                           .padding(.trailing, 3.scale)
+                        
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 20.scale)
+                .frame(height: 51.scale)
+                .background(Tokens.Color.accent)
+                .clipShape(
+                    RoundedRectangle(
+                        cornerRadius: Tokens.Radius.pill,
+                        style: .continuous
+                    )
+                )
+                .padding(.horizontal, 8.scale)
+                .padding(.bottom, 8.scale)
+                
+                
+            }
+        }
+        .frame(width: 343.scale, height: 241.scale)
+    }
+}
+
+
